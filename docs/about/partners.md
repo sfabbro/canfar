@@ -19,7 +19,7 @@ The NRC is home to the [Canadian Astronomy Data Centre](https://www.cadc-ccda.hi
 
     [CANARIE](https://www.canarie.ca) connects Canada to the world by providing an ultra high-speed network that links Canada’s researchers and educators to each other and to global data, technology, and colleagues through collaboration with government, industry, and international partners.
 
-- ![DRAC](./drac.png)
+- ![Digital Research Alliance Canada](./digital-research-alliance-canada.png)
 
     ---
 

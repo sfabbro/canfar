@@ -4,12 +4,12 @@
     This documentation covers the legacy CANFAR cloud platform based on OpenStack virtual machines. For new users, we recommend the modern [CANFAR Science Platform](get-started.md) which provides container-based sessions, improved workflows, and better resource management.
 
 !!! abstract "🎯 What You'll Learn"
-    - How to access legacy CANFAR cloud services via Digital Research Alliance Canada (DRAC) OpenStack
-    - Differences between DRAC OpenStack cloud and modern CANFAR platform access
+    - How to access legacy CANFAR cloud services via Digital Research Alliance Canada OpenStack
+    - Differences between Digital Research Alliance Canada OpenStack cloud and modern CANFAR platform access
     - VM management and batch processing workflows
     - Migration strategies to the modern platform
 
-The legacy CANFAR cloud services are hosted on the Digital Research Alliance Canada (DRAC) OpenStack infrastructure. This platform provides traditional virtual machines for users who require persistent compute environments or have specific legacy workflow requirements.
+The legacy CANFAR cloud services are hosted on the Digital Research Alliance Canada OpenStack infrastructure. This platform provides traditional virtual machines for users who require persistent compute environments or have specific legacy workflow requirements.
 
 ## 🔄 Migration to Modern Platform
 
@@ -32,9 +32,9 @@ Before proceeding with OpenStack VMs, consider whether the [modern CANFAR Scienc
 
 ## 🔑 Access and Authentication
 
-### Key Differences from DRAC Defaults
+### Key Differences from Digital Research Alliance Canada Defaults
 
-- **Credentials**: Sign in with **CADC Username/Password** (not a DRAC account)
+- **Credentials**: Sign in with **CADC Username/Password** (not a Digital Research Alliance Canada account)
 - **Portal**: Use the [arbutus-canfar portal](https://arbutus-canfar.cloud.computecanada.ca/) (instead of [arbutus](https://arbutus.cloud.computecanada.ca/))
 - **Resource policy**: Interactive analysis gets reasonable quotas; **batch processing** can scale to large footprints
 
@@ -49,7 +49,7 @@ A CADC account is required to access cloud services.
     - Estimated resources (storage, compute; whether you need batch)
     - A short description of your use case (2–3 sentences)
 
-CANFAR will review and coordinate project/quotas on the DRAC side.
+CANFAR will review and coordinate project/quotas on the Digital Research Alliance Canada side.
 
 ## 🖥️ Virtual Machine Management
 
@@ -57,17 +57,17 @@ CANFAR will review and coordinate project/quotas on the DRAC side.
 
 #### 1. Create a VM
 
-Use the DRAC web dashboard:
+Use the Digital Research Alliance Canada web dashboard:
 
 1. Sign in to [Dashboard](https://arbutus-canfar.cloud.computecanada.ca/) with CADC username/password
 2. Each CANFAR allocation maps to an OpenStack **Project**. Use the top-left project picker to switch if you belong to multiple
-3. Follow DRAC's [Creating a Linux VM](https://docs.alliancecan.ca/wiki/Creating_a_Linux_VM) documentation
+3. Follow Digital Research Alliance Canada's [Creating a Linux VM](https://docs.alliancecan.ca/wiki/Creating_a_Linux_VM) documentation
 
 #### 2. Import an SSH Public Key
 
 OpenStack prefers SSH key pairs over passwords:
 
-- If you do not have a key pair, run `ssh-keygen` locally or follow DRAC's SSH Keys documentation
+- If you do not have a key pair, run `ssh-keygen` locally or follow Digital Research Alliance Canada's SSH Keys documentation
 - In **Compute → Key Pairs**, click **Import Key Pair**
 - Name the key and paste your public key (default path `~/.ssh/id_rsa.pub`)
 
@@ -144,24 +144,24 @@ sudo dnf update
 This tutorial demonstrates building a basic **source detection** pipeline for CFHT MegaCam images on a CANFAR VM with fast access to the CADC archive and VOSpace.
 
 !!! note "You will learn to"
-    - Create/manage VMs on DRAC OpenStack / CANFAR
+    - Create/manage VMs on Digital Research Alliance Canada OpenStack / CANFAR
     - Access CADC VOSpace from VMs
     - Submit batch jobs that run your pipeline
 
 ### 1. Create a VM
 
-Use the DRAC web dashboard.
+Use the Digital Research Alliance Canada web dashboard.
 
 1. Sign in to [Dashboard](https://arbutus-canfar.cloud.computecanada.ca/) with CADC `[user]`/password.
 2. Each CANFAR allocation maps to an OpenStack **`[project]`**. Use the top-left project picker to switch if you belong to multiple.
 
-Follow DRAC's [Creating a Linux VM](https://docs.alliancecan.ca/wiki/Creating_a_Linux_VM). Summary below.
+Follow Digital Research Alliance Canada's [Creating a Linux VM](https://docs.alliancecan.ca/wiki/Creating_a_Linux_VM). Summary below.
 
 ### 2. Import an SSH Public Key
 
 OpenStack prefers SSH key pairs over passwords.
 
-- If you do not have a key pair, run `ssh-keygen` locally or follow DRAC's SSH Keys documentation.
+- If you do not have a key pair, run `ssh-keygen` locally or follow Digital Research Alliance Canada's SSH Keys documentation.
 - In **Compute → Key Pairs**, click **Import Key Pair**.
 - Name the key and paste your public key (default path `~/.ssh/id_rsa.pub`).
 

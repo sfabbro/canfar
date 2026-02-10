@@ -17,7 +17,7 @@ This unified FAQ covers the CANFAR Science Platform across all areas: Platform, 
 The CANFAR Science Platform is a national cloud computing environment tailored for astronomy. It provides interactive notebooks and desktops, browser-native visualization (e.g., CARTA, Firefly), user-contributed web applications, batch jobs, and direct access to CADC data holdings.
 
 ### Who can use it and what does it cost?
-CANFAR is free for astronomical research. Canadian astronomers and their collaborators can use it subject to fair‑use and allocation limits. For larger needs, request additional resources via the Digital Research Alliance of Canada (DRAC) Resource Allocation Competition.
+CANFAR is free for astronomical research. Canadian astronomers and their collaborators can use it subject to fair‑use and allocation limits. For larger needs, request additional resources via the Digital Research Alliance of Canada Resource Allocation Competition.
 
 ### How do I get access?
 1. To start, you must have a CADC account. If you don't have a CADC account, you can request one at: [https://www.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/en/auth/request.html](https://www.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/en/auth/request.html)
