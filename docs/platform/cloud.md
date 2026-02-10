@@ -4,12 +4,12 @@
     This documentation covers the legacy CANFAR cloud platform based on OpenStack virtual machines. For new users, we recommend the modern [CANFAR Science Platform](get-started.md) which provides container-based sessions, improved workflows, and better resource management.
 
 !!! abstract "🎯 What You'll Learn"
-    - How to access legacy CANFAR cloud services via Digital Research Alliance Canada (DRAC) OpenStack
-    - Differences between DRAC OpenStack cloud and modern CANFAR platform access
+    - How to access legacy CANFAR cloud services via Digital Research Alliance Canada OpenStack
+    - Differences between Digital Research Alliance Canada OpenStack cloud and modern CANFAR platform access
     - VM management and batch processing workflows
     - Migration strategies to the modern platform
 
-The legacy CANFAR cloud services are hosted on the Digital Research Alliance Canada (DRAC) OpenStack infrastructure. This platform provides traditional virtual machines for users who require persistent compute environments or have specific legacy workflow requirements.
+The legacy CANFAR cloud services are hosted on the Digital Research Alliance Canada OpenStack infrastructure. This platform provides traditional virtual machines for users who require persistent compute environments or have specific legacy workflow requirements.
 
 ## 🔄 Migration to Modern Platform
 
