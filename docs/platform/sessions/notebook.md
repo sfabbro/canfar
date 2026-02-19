@@ -160,6 +160,12 @@ python script.py
 git clone https://github.com/username/repo.git
 ```
 
+#### Accessing CVMFS Software
+
+All sessions have access to read-only scientific software repositories maintained by the **Digital Research Alliance of Canada (Alliance)** via CVMFS. These repositories provide thousands of pre-configured software packages and environment modules.
+
+See the **[Software Repositories (CVMFS)](../cvmfs.md)** guide for detailed instructions and examples of how to use this feature.
+
 ### Jupyter Extensions
 
 Many useful extensions are pre-installed:

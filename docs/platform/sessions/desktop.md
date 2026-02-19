@@ -163,6 +163,12 @@ Access CANFAR-supported and user-contributed astronomy containers:
 - Provide full functionality with isolated environments
 - Include DS9, CASA, TOPCAT, Aladin, and contributed applications
 
+#### CVMFS Software Repositories
+
+In addition to containerized applications, you can access a wide range of scientific software via the **CVMFS** repositories mounted at `/cvmfs/`.
+
+See the **[Software Repositories (CVMFS)](../cvmfs.md)** guide for more information and examples.
+
 !!! important "Application Launch Method"
     You cannot start astronomy applications by simply running commands like `ds9 &` in a terminal. These applications must be launched through desktop shortcuts or the Astro Software menu, as they run in separate containers.
 

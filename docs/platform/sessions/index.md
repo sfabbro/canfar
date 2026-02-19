@@ -130,6 +130,12 @@ Sessions run in [container environments](../containers/index.md) that include:
 - Scientific computing libraries (NumPy, SciPy, Matplotlib)
 - Development tools and utilities
 
+### CVMFS Software Repositories
+
+All CANFAR sessions provide access to read-only **CVMFS** (CernVM File System) software repositories. This feature provides instant access to the vast collections of pre-built scientific software maintained by the **Digital Research Alliance of Canada (Alliance)**.
+
+See the **[Software Repositories (CVMFS)](../cvmfs.md)** guide for more information and examples.
+
 ### Authentication & Permissions
 
 Sessions inherit your [CANFAR permissions](../permissions.md):

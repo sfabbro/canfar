@@ -178,6 +178,7 @@ nav:
     - Best Practices: platform/best-practices.md
     - Permissions: platform/permissions.md
     - DOI: platform/doi.md
+    - Software Repositories (CVMFS): platform/cvmfs.md
     - Cloud (legacy): platform/cloud.md
     - Sessions:
       - Overview: platform/sessions/index.md

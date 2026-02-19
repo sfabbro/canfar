@@ -410,6 +410,7 @@ CANFAR provides multiple storage systems optimised for different use cases in as
     | `/arc/projects/[project]/` | ✅ **Permanent, backed up** | Shared project data, results | Network-based shared POSIX |
     | `/arc/home/[user]/` | ✅ **Permanent, backed up** | Personal configs, scripts | Network-based shared POSIX |
     | `vos:[user\|project]` | ✅ **Permanent, archived** | Long-term storage, sharing | Network-based shared object store |
+    | [`/cvmfs/`](cvmfs.md) | ✅ **Permanent, read-only** | Global software repositories | Distributed read-only filesystem |
     | `/scratch/` | ❌ **Wiped at session end** | Large temporary computations | Local SSD POSIX|
 
 ### ARC Storage (`/arc/`) - Active Research Storage
