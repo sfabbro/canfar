@@ -21,6 +21,13 @@ if TYPE_CHECKING:
     from pydantic import SecretStr
 
 
+_LISTINGS_EXPIRY_SECONDS = 30
+"""Seconds a cached directory listing stays valid within one command."""
+
+_LISTINGS_MAX_PATHS = 1000
+"""Maximum directory listings retained by one filesystem."""
+
+
 def _vospace(
     name: str,
     *,
@@ -68,6 +75,9 @@ def _vospace(
                 token=token_value,
                 asynchronous=True,
                 skip_instance_cache=True,
+                use_listings_cache=True,
+                listings_expiry_time=_LISTINGS_EXPIRY_SECONDS,
+                max_paths=_LISTINGS_MAX_PATHS,
             )
         else:
             assert certfile is not None
@@ -76,6 +86,9 @@ def _vospace(
                 certfile=certfile,
                 asynchronous=True,
                 skip_instance_cache=True,
+                use_listings_cache=True,
+                listings_expiry_time=_LISTINGS_EXPIRY_SECONDS,
+                max_paths=_LISTINGS_MAX_PATHS,
             )
         try:
             yield filesystem

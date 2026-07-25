@@ -20,6 +20,13 @@ from tests.helpers.config import oidc_credential, x509_credential
 if TYPE_CHECKING:
     from pathlib import Path
 
+_LISTINGS = {
+    "use_listings_cache": True,
+    "listings_expiry_time": 30,
+    "max_paths": 1000,
+}
+"""Directory-listing cache settings every VOSpace filesystem is built with."""
+
 
 class _Filesystem:
     """Record construction and cleanup without VOSpace I/O."""
@@ -94,6 +101,7 @@ async def test_source_reloads_config_and_runtime_token_wins(
             "token": "runtime-token",
             "asynchronous": True,
             "skip_instance_cache": True,
+            **_LISTINGS,
         }
         assert filesystem.asynchronous is True
         assert filesystem.closed is False
@@ -144,6 +152,7 @@ async def test_environment_token_preserves_runtime_precedence(
             "token": "environment-token",
             "asynchronous": True,
             "skip_instance_cache": True,
+            **_LISTINGS,
         }
 
 
@@ -170,6 +179,7 @@ async def test_environment_certificate_preserves_runtime_precedence(
             "certfile": certificate.as_posix(),
             "asynchronous": True,
             "skip_instance_cache": True,
+            **_LISTINGS,
         }
 
     valid.assert_called_once_with(certificate)
