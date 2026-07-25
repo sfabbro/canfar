@@ -195,7 +195,7 @@ def _validated_refresh(refreshed: Any) -> dict[str, Any]:
     return dict(refreshed)
 
 
-def _refresh_parameters(
+def _refresh(
     credential: OIDCCredential,
 ) -> tuple[str, str, str, str] | None:
     """Return complete literal refresh inputs when the record is eligible."""
@@ -209,7 +209,7 @@ def _refresh_parameters(
     )
 
 
-def _persist_refreshed_credential(
+def _persist(
     config: Configuration,
     credential: OIDCCredential,
     refreshed: dict[str, Any],

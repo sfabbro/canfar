@@ -1,4 +1,4 @@
-"""Tests for private authenticated VOSpace source adapters."""
+"""Tests for the VOSpace and local storage source adapters."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ import pytest
 import vosfs
 from pydantic import AnyHttpUrl, AnyUrl
 
-from canfar._storage import _vospace_source
 from canfar.exceptions.context import AuthContextError
 from canfar.models.active import ActiveConfig
 from canfar.models.config import Configuration
 from canfar.models.http import Server, VOSpaceService
+from canfar.storages import _vospace
 from tests.helpers.config import oidc_credential, x509_credential
 
 if TYPE_CHECKING:
@@ -76,7 +76,7 @@ async def test_source_reloads_config_and_runtime_token_wins(
     """Entry reloads endpoint state and keeps token-over-certificate precedence."""
     config = _config(credential=oidc_credential("inactive"))
     config.save()
-    source = _vospace_source(
+    source = _vospace(
         "archive",
         token="runtime-token",
         certificate=tmp_path / "ignored.pem",
@@ -115,7 +115,7 @@ async def test_source_factory_constructs_fresh_filesystem_per_acquisition(
         return filesystem
 
     monkeypatch.setattr(vosfs, "VOSpaceFileSystem", build)
-    source = _vospace_source("archive")
+    source = _vospace("archive")
 
     async with source() as first:
         assert first.closed is False
@@ -139,7 +139,7 @@ async def test_environment_token_preserves_runtime_precedence(
     monkeypatch.setenv("CANFAR_TOKEN", "environment-token")
     monkeypatch.setattr(vosfs, "VOSpaceFileSystem", _Filesystem)
 
-    async with _vospace_source("archive")() as filesystem:
+    async with _vospace("archive")() as filesystem:
         assert filesystem.kwargs == {
             "token": "environment-token",
             "asynchronous": True,
@@ -165,7 +165,7 @@ async def test_environment_certificate_preserves_runtime_precedence(
     monkeypatch.setattr("canfar.client.x509.valid", valid)
     monkeypatch.setattr(vosfs, "VOSpaceFileSystem", _Filesystem)
 
-    async with _vospace_source("archive")() as filesystem:
+    async with _vospace("archive")() as filesystem:
         assert filesystem.kwargs == {
             "certfile": certificate.as_posix(),
             "asynchronous": True,
@@ -198,7 +198,7 @@ async def test_expired_inactive_oidc_refreshes_once_and_persists(
     monkeypatch.setattr("canfar.client.oidc.refresh", refresh)
     monkeypatch.setattr(vosfs, "VOSpaceFileSystem", _Filesystem)
 
-    async with _vospace_source("archive")() as filesystem:
+    async with _vospace("archive")() as filesystem:
         assert filesystem.kwargs["token"] == "new-access-secret"
 
     refresh.assert_awaited_once_with(
@@ -224,7 +224,7 @@ async def test_valid_saved_oidc_access_token_is_reused(
     monkeypatch.setattr("canfar.client.oidc.refresh", refresh)
     monkeypatch.setattr(vosfs, "VOSpaceFileSystem", _Filesystem)
 
-    async with _vospace_source("archive")() as filesystem:
+    async with _vospace("archive")() as filesystem:
         assert filesystem.kwargs["token"] == "current-token"
 
     refresh.assert_not_awaited()
@@ -247,7 +247,7 @@ async def test_saved_x509_is_validated_before_construction(
     monkeypatch.setattr("canfar.client.x509.inspect", inspect_certificate)
     monkeypatch.setattr(vosfs, "VOSpaceFileSystem", _Filesystem)
 
-    async with _vospace_source("archive")() as filesystem:
+    async with _vospace("archive")() as filesystem:
         assert filesystem.kwargs["certfile"] == certificate.as_posix()
 
     inspect.assert_called_once_with(certificate)
@@ -269,7 +269,7 @@ async def test_runtime_x509_overrides_saved_authentication_record(
     monkeypatch.setattr("canfar.client.x509.valid", valid)
     monkeypatch.setattr(vosfs, "VOSpaceFileSystem", _Filesystem)
 
-    async with _vospace_source("archive", certificate=certificate)() as filesystem:
+    async with _vospace("archive", certificate=certificate)() as filesystem:
         assert filesystem.kwargs["certfile"] == certificate.as_posix()
 
     valid.assert_called_once_with(certificate)
@@ -291,7 +291,7 @@ async def test_invalid_saved_x509_fails_before_vospace(
     monkeypatch.setattr(vosfs, "VOSpaceFileSystem", constructor)
 
     with pytest.raises(AuthContextError, match="canfar login") as exc_info:
-        async with _vospace_source("archive")():
+        async with _vospace("archive")():
             pass
 
     assert "certificate parse detail" not in str(exc_info.value)
@@ -316,7 +316,7 @@ async def test_source_closes_on_failure_and_cancellation(
     monkeypatch.setattr(vosfs, "VOSpaceFileSystem", build)
 
     async def use_source() -> None:
-        async with _vospace_source("archive")():
+        async with _vospace("archive")():
             if exit_kind == "error":
                 raise RuntimeError
             await asyncio.Event().wait()
@@ -352,7 +352,7 @@ async def test_unrefreshable_oidc_fails_secret_safe_before_vospace(
     monkeypatch.setattr(vosfs, "VOSpaceFileSystem", constructor)
 
     with pytest.raises(AuthContextError, match="canfar login") as exc_info:
-        async with _vospace_source("archive")():
+        async with _vospace("archive")():
             pass
 
     message = str(exc_info.value)
@@ -371,7 +371,7 @@ async def test_empty_saved_oidc_token_fails_cleanly(
     monkeypatch.setattr(vosfs, "VOSpaceFileSystem", constructor)
 
     with pytest.raises(AuthContextError, match="canfar login"):
-        async with _vospace_source("archive")():
+        async with _vospace("archive")():
             pass
 
     constructor.assert_not_called()

@@ -1,9 +1,12 @@
-"""Private adapters for configured VOSpace Services."""
+"""Adapters for the configured VOSpace Services and the local filesystem."""
 
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
+
+from fsspec.implementations.asyn_wrapper import AsyncFileSystemWrapper
+from fsspec.implementations.local import LocalFileSystem
 
 from canfar.client import HTTPClient
 from canfar.exceptions.context import AuthContextError
@@ -18,18 +21,27 @@ if TYPE_CHECKING:
     from pydantic import SecretStr
 
 
-def _vospace_source(
-    storage_name: str,
+def _vospace(
+    name: str,
     *,
     token: str | SecretStr | None = None,
     certificate: Path | None = None,
 ) -> AsyncFilesystemSource:
-    """Return a fresh authenticated async filesystem source."""
+    """Return a fresh authenticated async filesystem source.
+
+    Args:
+        name: Storage Name of the configured VOSpace Service.
+        token: Runtime bearer token, preferred over any saved credential.
+        certificate: Runtime X.509 certificate path.
+
+    Returns:
+        AsyncFilesystemSource: Factory yielding one authenticated filesystem.
+    """
 
     @asynccontextmanager
     async def source() -> AsyncIterator[AbstractFileSystem]:
         config = Configuration()  # ty: ignore[missing-argument]
-        endpoint, idp = config._resolve_storage(storage_name)  # noqa: SLF001
+        endpoint, idp = config._resolve_storage(name)  # noqa: SLF001
         try:
             client_kwargs: dict[str, Any] = {
                 "config": config,
@@ -71,3 +83,35 @@ def _vospace_source(
             await filesystem.aclose()
 
     return source
+
+
+@asynccontextmanager
+async def _local() -> AsyncIterator[AbstractFileSystem]:
+    """Yield a fresh asynchronous wrapper around the local filesystem.
+
+    Yields:
+        AbstractFileSystem: An async-wrapped local filesystem.
+    """
+    yield AsyncFileSystemWrapper(
+        LocalFileSystem(skip_instance_cache=True),
+        asynchronous=True,
+    )
+
+
+def sources() -> dict[str, AsyncFilesystemSource]:
+    """Build the mapped storage sources for one data command invocation.
+
+    Every configured VOSpace Service is mapped by its Storage Name, plus the
+    always-available ``local`` filesystem.
+
+    Returns:
+        dict[str, AsyncFilesystemSource]: Sources keyed by Storage Name.
+    """
+    config = Configuration()  # ty: ignore[missing-argument]
+    mapped = {
+        name: _vospace(name)
+        for server in config.servers.values()
+        for name in server.storage
+    }
+    mapped["local"] = _local
+    return mapped

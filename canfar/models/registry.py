@@ -25,7 +25,7 @@ class IVOARegistrySearch(BaseModel):
         }
     )
 
-    preferred_storage_leaf: str | None = None
+    leaf: str | None = None
 
     names: dict[str, str] = Field(
         default={

@@ -78,7 +78,7 @@ def _apply_refreshed_token(
     request: httpx.Request,
 ) -> None:
     """Atomically persist refreshed OIDC state, then update active headers."""
-    updated = oidc._persist_refreshed_credential(  # noqa: SLF001
+    updated = oidc._persist(  # noqa: SLF001
         client.config, credential, refreshed
     )
     log.debug("Authentication refreshed and configuration saved.")
@@ -120,7 +120,7 @@ def refresh(client: HTTPClient) -> Callable[[httpx.Request], None]:
             log.debug("Skipping auth refresh, access token is not expired.")
             return
 
-        parameters = oidc._refresh_parameters(credential)  # noqa: SLF001
+        parameters = oidc._refresh(credential)  # noqa: SLF001
         if parameters is None:
             log.warning("OIDC Authentication Record cannot be refreshed.")
             return
@@ -182,7 +182,7 @@ def arefresh(client: HTTPClient) -> Callable[[httpx.Request], Awaitable[None]]:
                     )
                 return
 
-            parameters = oidc._refresh_parameters(credential)  # noqa: SLF001
+            parameters = oidc._refresh(credential)  # noqa: SLF001
             if parameters is None:
                 log.warning("OIDC Authentication Record cannot be refreshed.")
                 return

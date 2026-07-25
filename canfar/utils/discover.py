@@ -111,7 +111,7 @@ class Discover:
             uri, url = uri.strip(), url.strip()
 
             leaf = uri.rpartition("/")[2]
-            if leaf in {"skaha", self.config.preferred_storage_leaf}:
+            if leaf in {"skaha", self.config.leaf}:
                 url = _without_terminal_capabilities(url)
                 if url is None:
                     continue

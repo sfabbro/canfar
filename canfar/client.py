@@ -250,11 +250,11 @@ class HTTPClient(BaseSettings):
             raise TypeError
 
         if credential.expired:
-            parameters = oidc._refresh_parameters(credential)  # noqa: SLF001
+            parameters = oidc._refresh(credential)  # noqa: SLF001
             if parameters is None:
                 raise ValueError
             refreshed = await oidc.refresh(*parameters)
-            credential = oidc._persist_refreshed_credential(  # noqa: SLF001
+            credential = oidc._persist(  # noqa: SLF001
                 self.config,
                 credential,
                 refreshed,

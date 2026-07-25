@@ -19,7 +19,7 @@ class IdpInfo(BaseModel):
         auth_mode: Default authentication mode for the IDP.
         registry_url: IVOA registry resource-caps URL for server discovery.
         registry_name: Registry display name used for server discovery.
-        preferred_storage_leaf: Preferred primary VOSpace registry URI leaf.
+        leaf: Preferred primary VOSpace registry URI leaf.
         dev_registries: Development registry resource-caps URLs keyed by URL.
         oidc_discovery_url: OIDC discovery URL when ``auth_mode`` is ``oidc``.
         oidc_issuer: Exact issuer expected from OIDC discovery metadata.
@@ -37,7 +37,7 @@ class IdpInfo(BaseModel):
         default=None,
         description="Registry display name used for server discovery.",
     )
-    preferred_storage_leaf: str | None = Field(
+    leaf: str | None = Field(
         default=None,
         description="Preferred primary VOSpace registry URI leaf.",
     )
@@ -61,7 +61,7 @@ _BUILTIN_IDPS: dict[str, IdpInfo] = {
         name="Canadian Astronomy Data Centre",
         auth_mode="x509",
         registry_name="CADC",
-        preferred_storage_leaf="arc",
+        leaf="arc",
         registry_url=AnyHttpUrl(
             "https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/reg/resource-caps"
         ),
@@ -76,7 +76,7 @@ _BUILTIN_IDPS: dict[str, IdpInfo] = {
         name="SKA Regional Centre Network",
         auth_mode="oidc",
         registry_name="SRCNet",
-        preferred_storage_leaf="cavern",
+        leaf="cavern",
         registry_url=AnyHttpUrl("https://spsrc27.iaa.csic.es/reg/resource-caps"),
         oidc_discovery_url=AnyHttpUrl(
             "https://ska-iam.stfc.ac.uk/.well-known/openid-configuration"
