@@ -66,6 +66,72 @@ class TestConfigurationDefaults:
         dumped = config.model_dump(mode="json", exclude_none=True)
         assert dumped["servers"]["canfar"]["name"] == "canfar"
 
+    def test_default_canfar_server_ships_arc_and_vault_storage(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The CADC Science Platform Server exposes both VOSpace Services."""
+        config_path = tmp_path / "config.yaml"
+        with patch("canfar.models.config.CONFIG_PATH", config_path):
+            config = Configuration()
+
+        assert set(config.servers["canfar"].storage) == {"arc", "vault"}
+        for name, endpoint in (
+            ("arc", "https://ws-uv.canfar.net/arc"),
+            ("vault", "https://cadc-west-01.canfar.net/vault"),
+        ):
+            resolved, idp = config._resolve_storage(name)  # noqa: SLF001
+            assert resolved.rstrip("/") == endpoint
+            assert idp == "cadc"
+
+    def test_legacy_server_named_storage_is_healed(self, tmp_path: Path) -> None:
+        """A Storage Name saved as the Server Name is restored to its leaf."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "version: 1\n"
+            "servers:\n"
+            "  canfar:\n"
+            "    idp: cadc\n"
+            "    uri: ivo://cadc.nrc.ca/skaha\n"
+            "    url: https://ws-uv.canfar.net/skaha\n"
+            "    version: v1\n"
+            "    auths: [x509]\n"
+            "    storage:\n"
+            "      canfar:\n"
+            "        uri: ivo://cadc.nrc.ca/arc\n"
+            "        url: https://ws-uv.canfar.net/arc\n",
+            encoding="utf-8",
+        )
+        with patch("canfar.models.config.CONFIG_PATH", config_path):
+            config = Configuration()
+
+        storage = config.servers["canfar"].storage
+        assert set(storage) == {"arc", "vault"}
+        assert str(storage["arc"].url).rstrip("/") == "https://ws-uv.canfar.net/arc"
+
+    def test_custom_storage_names_are_not_healed(self, tmp_path: Path) -> None:
+        """Deliberate Storage Names are configuration, not stale defaults."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "version: 1\n"
+            "servers:\n"
+            "  canfar:\n"
+            "    idp: cadc\n"
+            "    uri: ivo://cadc.nrc.ca/skaha\n"
+            "    url: https://ws-uv.canfar.net/skaha\n"
+            "    version: v1\n"
+            "    auths: [x509]\n"
+            "    storage:\n"
+            "      canSRC:\n"
+            "        uri: ivo://cadc.nrc.ca/arc\n"
+            "        url: https://ws-cadc.canfar.net/arc\n",
+            encoding="utf-8",
+        )
+        with patch("canfar.models.config.CONFIG_PATH", config_path):
+            config = Configuration()
+
+        assert set(config.servers["canfar"].storage) == {"canSRC"}
+
     def test_default_authentication_dict_keyed_by_idp(self, tmp_path: Path) -> None:
         """Default Authentication Records are keyed by IDP."""
         config_path = tmp_path / "config.yaml"
@@ -457,10 +523,10 @@ class TestConfigurationSerialization:
         assert loaded.servers["canfar"].idp == "cadc"
         assert loaded == config
 
-    def test_existing_v1_configuration_without_storage_loads_unchanged(
+    def test_existing_v1_configuration_without_storage_gains_defaults(
         self, tmp_path: Path
     ) -> None:
-        """The optional storage mapping does not require a schema migration."""
+        """A storage-less Server gains defaults without a schema migration."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text(yaml.safe_dump(_sample_config()), encoding="utf-8")
 
@@ -468,7 +534,7 @@ class TestConfigurationSerialization:
             config = Configuration()
 
         assert config.version == 1
-        assert config.servers["canfar"].storage == {}
+        assert set(config.servers["canfar"].storage) == {"arc", "vault"}
 
     def test_save_creates_directory(self, tmp_path: Path) -> None:
         """Save creates parent directories when missing."""

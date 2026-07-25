@@ -3,22 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 from xml.etree.ElementTree import ParseError
 
 import httpx
 from defusedxml.common import DefusedXmlException
-from pydantic import AnyHttpUrl, AnyUrl, ValidationError
+from pydantic import AnyHttpUrl, AnyUrl, BaseModel, ConfigDict, ValidationError
 
-from canfar import get_logger
-from canfar._discovery import (
-    RegistryEvidenceError,
-    discover_storage_resource,
-    load_registry_evidence,
-    prepare_enrichment_workers,
-    select_storage_resource,
-)
+from canfar import _discovery, get_logger
+from canfar._discovery import RegistryEvidenceError
 from canfar.auth.x509 import CertificateError
 from canfar.errors import ErrorCode, StructuredError
 from canfar.exceptions.context import AuthContextError, AuthExpiredError
@@ -88,12 +81,42 @@ class ServerSelectionRequiredError(RuntimeError):
         self.servers = servers
 
 
-@dataclass(frozen=True)
-class ServerActivation:
-    """Result from activating an Authentication and Server pair."""
+class ServerActivation(BaseModel):
+    """Result from activating an Authentication and Server pair.
+
+    Attributes:
+        server: The activated Science Platform Server.
+        reason: Why this Server was chosen.
+    """
+
+    model_config = ConfigDict(frozen=True)
 
     server: Server
     reason: Literal["active", "remembered", "single", "selected"]
+
+
+def _merge_storage(
+    known: dict[str, VOSpaceService],
+    found: dict[str, VOSpaceService],
+) -> dict[str, VOSpaceService]:
+    """Merge discovered VOSpace Services into known ones, keyed by IVOA URI.
+
+    Discovery names a new Service after its Server Name, so an existing Service
+    configured under its registry leaf (``arc``) is refreshed in place instead
+    of being duplicated under the Server Name on every rediscovery.
+
+    Args:
+        known: Configured VOSpace Services keyed by Storage Name.
+        found: Newly discovered VOSpace Services keyed by Storage Name.
+
+    Returns:
+        dict[str, VOSpaceService]: Merged Services keyed by Storage Name.
+    """
+    merged = dict(known)
+    names = {str(service.uri): name for name, service in known.items()}
+    for name, service in found.items():
+        merged[names.get(str(service.uri), name)] = service
+    return merged
 
 
 def discover(
@@ -147,7 +170,9 @@ def discover(
             if known is not None and known.version is not None and known.auths:
                 if server.storage:
                     known = known.model_copy(
-                        update={"storage": {**known.storage, **server.storage}},
+                        update={
+                            "storage": _merge_storage(known.storage, server.storage)
+                        },
                         deep=True,
                     )
                 canonical[name] = known
@@ -159,7 +184,7 @@ def discover(
                 exclude_none=True,
             )
             if server.storage:
-                updates["storage"] = {**known.storage, **server.storage}
+                updates["storage"] = _merge_storage(known.storage, server.storage)
             merged_server = known.model_copy(update=updates, deep=True)
         canonical[name] = merged_server
 
@@ -413,7 +438,7 @@ async def _discover_for_idp(
     Raises:
         ServerDiscoveryError: If registry retrieval fails.
     """
-    evidence = await load_registry_evidence(
+    evidence = await _discovery.discover(
         idp,
         dev=dev,
         timeout=timeout,
@@ -435,9 +460,9 @@ async def _discover_for_idp(
     storage_resources = [
         resource
         for resource in evidence.resources
-        if resource.uri.endswith(f"/{evidence.preferred_storage_leaf}")
+        if resource.uri.endswith(f"/{evidence.leaf}")
     ]
-    workers = await prepare_enrichment_workers(
+    workers = await _discovery.enrich(
         config,
         idp,
         endpoint=endpoints[0],
@@ -457,7 +482,7 @@ async def _discover_for_idp(
                     token=workers.token,
                     certificate=workers.certificate,
                     timeout=timeout,
-                    storage_resource=_select_storage_resource(
+                    storage_resource=_select_storage(
                         endpoint,
                         storage_resources,
                         strict=False,
@@ -480,7 +505,7 @@ def _host_slug(uri: AnyUrl) -> str | None:
     return uri.host.replace(".", "-")
 
 
-def _select_storage_resource(
+def _select_storage(
     endpoint: RegistryResource,
     resources: list[RegistryResource],
     *,
@@ -488,12 +513,12 @@ def _select_storage_resource(
 ) -> RegistryResource | None:
     """Map private registry ambiguity to the public server fetch error."""
     try:
-        return select_storage_resource(endpoint, resources, strict=strict)
+        return _discovery.select_storage(endpoint, resources, strict=strict)
     except RegistryEvidenceError as exc:
         raise ServerFetchError(str(exc)) from exc
 
 
-async def _discover_storage_resource(
+async def _discover_storage(
     server: Server,
     idp: str,
     *,
@@ -502,7 +527,7 @@ async def _discover_storage_resource(
 ) -> RegistryResource | None:
     """Return fresh registry evidence for a server's primary VOSpace service."""
     try:
-        return await discover_storage_resource(
+        return await _discovery.discover_storage(
             str(server.uri) if server.uri is not None else None,
             str(server.url) if server.url is not None else None,
             server.name,
@@ -723,7 +748,7 @@ def _enrich_storage(
     """Validate and attach one retained primary VOSpace registry resource."""
     error: BaseException | None = None
     if storage_resource is None:
-        leaf = get_idp(authentication_idp).preferred_storage_leaf
+        leaf = get_idp(authentication_idp).leaf
         subject = f"same-namespace '{leaf}' registry record"
         error = ValueError(
             f"No {subject} found for Science Platform Server '{server.name}'."
@@ -862,7 +887,7 @@ def _validate_server(
     storage_resource = _configured_storage_resource(server)
     if storage_resource is None:
         storage_resource = asyncio.run(
-            _discover_storage_resource(
+            _discover_storage(
                 server,
                 active_idp,
                 dev=dev,

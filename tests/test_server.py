@@ -15,7 +15,7 @@ from pydantic import AnyHttpUrl, AnyUrl
 from canfar.errors import ErrorCode
 from canfar.models.active import ActiveConfig
 from canfar.models.auth import OIDCCredential, X509Credential
-from canfar.models.config import Configuration
+from canfar.models.config import Configuration, default_servers
 from canfar.models.http import Server, VOSpaceService
 from canfar.models.registry import IVOARegistry, IVOARegistrySearch
 from canfar.models.registry import Server as DiscoveredServer
@@ -25,7 +25,7 @@ from canfar.server import (
     ServerSelectionRequiredError,
     _discover_for_idp,
     _discovered_to_server,
-    _select_storage_resource,
+    _select_storage,
     activate,
     discover,
     enrich,
@@ -378,7 +378,7 @@ class TestServerDiscovery:
                 "https://platform.example/skaha-arc/capabilities"
             ),
         )
-        search = IVOARegistrySearch(preferred_storage_leaf="arc")
+        search = IVOARegistrySearch(leaf="arc")
 
         async with Discover(search) as discovery:
             resources = discovery.extract(registry)
@@ -393,7 +393,12 @@ class TestServerDiscovery:
         self,
         tmp_path: Path,
     ) -> None:
-        """Rediscovery updates only the generated Storage Name entry."""
+        """Rediscovery updates only the generated Storage Name entry.
+
+        A Server Name keyed entry saved by an older client is healed to its
+        registry leaf (``arc``) on load, so rediscovery refreshes that entry in
+        place instead of generating a second one.
+        """
         manual = VOSpaceService(
             uri="ivo://cadc.nrc.ca/custom",
             url="https://manual.example/custom",
@@ -461,17 +466,13 @@ class TestServerDiscovery:
 
             persisted = Configuration().servers["canfar"]
 
-        assert (
-            discovered.storage
-            == persisted.storage
-            == {
-                "canfar": VOSpaceService(
-                    uri="ivo://cadc.nrc.ca/arc",
-                    url="https://storage.example/arc",
-                ),
-                "archive": manual,
-            }
+        assert discovered.storage == persisted.storage
+        assert set(discovered.storage) == {"arc", "archive", "vault"}
+        assert discovered.storage["arc"] == VOSpaceService(
+            uri="ivo://cadc.nrc.ca/arc",
+            url="https://storage.example/arc",
         )
+        assert discovered.storage["archive"] == manual
 
     @pytest.mark.parametrize("mode", ["missing", "malformed", "unreachable"])
     def test_storage_inspection_fail_or_keep_outcomes(
@@ -668,7 +669,7 @@ class TestServerDiscovery:
             url="https://storage.example/arc",
         )
 
-        assert _select_storage_resource(endpoint, [dev_storage], strict=False) is None
+        assert _select_storage(endpoint, [dev_storage], strict=False) is None
 
     @pytest.mark.asyncio
     async def test_mixed_registry_records_keep_per_record_environment(self) -> None:
@@ -683,14 +684,14 @@ class TestServerDiscovery:
                 "https://storage.example/dev/capabilities"
             ),
         )
-        search = IVOARegistrySearch(preferred_storage_leaf="cavern")
+        search = IVOARegistrySearch(leaf="cavern")
 
         async with Discover(search) as discovery:
             endpoint, storage = discovery.extract(registry, dev=True)
 
         assert endpoint.development is False
         assert storage.development is True
-        assert _select_storage_resource(endpoint, [storage], strict=False) is None
+        assert _select_storage(endpoint, [storage], strict=False) is None
 
     def test_ambiguous_cross_registry_storage_is_not_last_write_wins(self) -> None:
         """Multiple namespace fallbacks are omitted or actionable, never arbitrary."""
@@ -709,9 +710,9 @@ class TestServerDiscovery:
             for index in (1, 2)
         ]
 
-        assert _select_storage_resource(endpoint, storage, strict=False) is None
+        assert _select_storage(endpoint, storage, strict=False) is None
         with pytest.raises(ServerFetchError, match="Multiple preferred VOSpace"):
-            _select_storage_resource(endpoint, storage, strict=True)
+            _select_storage(endpoint, storage, strict=True)
 
     @pytest.mark.asyncio
     async def test_capability_enrichment_runs_concurrently_off_event_loop(
@@ -1065,13 +1066,18 @@ class TestServerDiscovery:
 
             persisted = Configuration().servers["canfar"]
 
+        # A storage-less saved Server gains the default VOSpace Services on load.
+        healed = known.model_copy(
+            update={"storage": default_servers["canfar"].storage},
+            deep=True,
+        )
         expected = (
-            known.model_copy(
+            healed.model_copy(
                 update={"version": "v2.1", "auths": ["oidc"]},
                 deep=True,
             )
             if capabilities_case == "success"
-            else known
+            else healed
         )
         assert discovered == [expected]
         assert config.servers["canfar"] == expected

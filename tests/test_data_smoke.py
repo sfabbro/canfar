@@ -14,7 +14,7 @@ from canfar.models.config import Configuration
 
 def _skip(reason: str) -> NoReturn:
     pytest.skip(
-        "live data smoke requires Storage Name 'canfar' and a valid saved "
+        "live data smoke requires Storage Name 'arc' and a valid saved "
         f"Authentication Record/certificate: {reason}"
     )
 
@@ -27,7 +27,7 @@ def _require_live_credentials() -> None:
         _skip("configuration is unavailable")
 
     try:
-        _endpoint, idp = config._resolve_storage("canfar")  # noqa: SLF001
+        _endpoint, idp = config._resolve_storage("arc")  # noqa: SLF001
         credential = config.get_credential(idp)
     except (KeyError, ValueError):
         _skip("the named service or its Authentication Record is unavailable")
@@ -58,7 +58,7 @@ def test_canfar_data_lists_live_primary_storage() -> None:
     """List the configured live CADC primary VOSpace Service when available."""
     _require_live_credentials()
 
-    result = CliRunner().invoke(cli, ["data", "ls", "-lh", "canfar:/"])
+    result = CliRunner().invoke(cli, ["data", "ls", "-lh", "arc:/"])
 
     assert result.exit_code == 0, result.output
     assert not result.stdout.startswith("@")
