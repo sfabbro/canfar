@@ -15,6 +15,7 @@ import typer
 from typer.testing import CliRunner
 
 import canfar.cli.data as data_cli
+from canfar import storages
 from canfar.cli.main import cli
 
 if TYPE_CHECKING:
@@ -83,8 +84,8 @@ def test_upstream_app_receives_configured_sources_and_policy(monkeypatch) -> Non
             captured_capabilities.append(capabilities)
             self.typer_app = typer.Typer()
 
-    monkeypatch.setattr(data_cli, "Configuration", configuration)
-    monkeypatch.setattr(data_cli, "_vospace_source", source_factory)
+    monkeypatch.setattr(storages, "Configuration", configuration)
+    monkeypatch.setattr(storages, "_vospace", source_factory)
     monkeypatch.setattr(data_cli, "App", FakeApp)
 
     data_cli._upstream_group()  # noqa: SLF001
@@ -95,7 +96,7 @@ def test_upstream_app_receives_configured_sources_and_policy(monkeypatch) -> Non
         {"arc", "cavern", "vault", "local"},
     ]
     assert all(
-        sources["local"] is data_cli._local_source  # noqa: SLF001
+        sources["local"] is storages._local  # noqa: SLF001
         for sources in captured_sources
     )
     assert captured_capabilities == [
@@ -105,11 +106,11 @@ def test_upstream_app_receives_configured_sources_and_policy(monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_local_source_returns_fresh_async_wrappers() -> None:
+async def test_local_storage_returns_fresh_async_wrappers() -> None:
     """Each local source entry owns a fresh asynchronous wrapper."""
-    async with data_cli._local_source() as first:  # noqa: SLF001
+    async with storages._local() as first:  # noqa: SLF001
         assert first.asynchronous is True
-    async with data_cli._local_source() as second:  # noqa: SLF001
+    async with storages._local() as second:  # noqa: SLF001
         assert second.asynchronous is True
 
     assert first is not second
@@ -123,7 +124,7 @@ def test_data_cat_delegates_without_active_server_banner(
     """Data stdout belongs byte-for-byte to the upstream command."""
     payload = tmp_path / "payload.txt"
     payload.write_text("upstream output\n", encoding="utf-8")
-    monkeypatch.setattr(data_cli, "Configuration", _configuration)
+    monkeypatch.setattr(storages, "Configuration", _configuration)
 
     result = runner.invoke(cli, ["data", "cat", f"local:{payload}"])
 
@@ -138,14 +139,14 @@ def test_data_long_listing_delegates_unchanged(
     """The documented ``ls -lh name:/path`` form reaches upstream unchanged."""
     (tmp_path / "payload.txt").write_text("listed", encoding="utf-8")
     monkeypatch.setattr(
-        data_cli,
+        storages,
         "Configuration",
         partial(_configuration, "canSRC"),
     )
     monkeypatch.setattr(
-        data_cli,
-        "_vospace_source",
-        lambda _name: data_cli._local_source,  # noqa: SLF001
+        storages,
+        "_vospace",
+        lambda _name: storages._local,  # noqa: SLF001
     )
 
     result = runner.invoke(cli, ["data", "ls", "-lh", f"canSRC:{tmp_path}"])
@@ -164,14 +165,14 @@ def test_data_recursive_copy_delegates_to_released_contract(
     (source / "payload.txt").write_text("copied", encoding="utf-8")
     destination = tmp_path / "destination"
     monkeypatch.setattr(
-        data_cli,
+        storages,
         "Configuration",
         partial(_configuration, "canSRC"),
     )
     monkeypatch.setattr(
-        data_cli,
-        "_vospace_source",
-        lambda _name: data_cli._local_source,  # noqa: SLF001
+        storages,
+        "_vospace",
+        lambda _name: storages._local,  # noqa: SLF001
     )
 
     result = runner.invoke(
@@ -183,15 +184,25 @@ def test_data_recursive_copy_delegates_to_released_contract(
     assert (destination / "payload.txt").read_text(encoding="utf-8") == "copied"
 
 
-def test_data_recursive_remove_is_disabled(monkeypatch, tmp_path: Path) -> None:
-    """CANFAR keeps upstream recursive removal source-free and disabled."""
-    monkeypatch.setattr(data_cli, "Configuration", _configuration)
+@pytest.mark.parametrize("flag", ["-R", "-r"])
+def test_data_recursive_remove_is_disabled(
+    monkeypatch,
+    tmp_path: Path,
+    flag: str,
+) -> None:
+    """CANFAR keeps upstream recursive removal source-free and disabled.
 
-    result = runner.invoke(cli, ["data", "rm", "-R", f"local:{tmp_path}"])
+    Upstream ``fsspec-cli`` v0.6.0 gave parsing to Typer, so the disabled
+    ``recursion.remove`` capability now omits the flag from ``rm`` entirely
+    instead of registering it and rejecting the invocation at runtime.
+    """
+    monkeypatch.setattr(storages, "Configuration", _configuration)
+
+    result = runner.invoke(cli, ["data", "rm", flag, f"local:{tmp_path}"])
 
     assert result.exit_code == 2
     assert result.stdout == ""
-    assert result.stderr == "rm: recursive removal disabled by application\n"
+    assert f"No such option: {flag}" in result.stderr
 
 
 def test_data_cross_source_move_retains_upstream_rejection(monkeypatch) -> None:
@@ -203,8 +214,8 @@ def test_data_cross_source_move_retains_upstream_rejection(monkeypatch) -> None:
         raise AssertionError(msg)
         yield
 
-    monkeypatch.setattr(data_cli, "Configuration", partial(_configuration, "arc"))
-    monkeypatch.setattr(data_cli, "_vospace_source", lambda _name: unused_source)
+    monkeypatch.setattr(storages, "Configuration", partial(_configuration, "arc"))
+    monkeypatch.setattr(storages, "_vospace", lambda _name: unused_source)
 
     result = runner.invoke(cli, ["data", "mv", "arc:/a", "local:/b"])
 
@@ -219,7 +230,7 @@ def test_data_deprecated_operand_grammar_is_unsupported(
     operand: str,
 ) -> None:
     """Only the upstream explicit ``name:/absolute/path`` grammar is accepted."""
-    monkeypatch.setattr(data_cli, "Configuration", _configuration)
+    monkeypatch.setattr(storages, "Configuration", _configuration)
 
     result = runner.invoke(cli, ["data", "ls", operand])
 
@@ -231,7 +242,7 @@ def test_data_deprecated_operand_grammar_is_unsupported(
     [
         (["storage", "ls"], "No such command 'storage'"),
         (["data", "ls", "active:/"], "unknown filesystem"),
-        (["data", "ls", "-h", "local:/"], "-h: unsupported option"),
+        (["data", "ls", "-h", "local:/"], "-h: requires long listing"),
     ],
 )
 def test_data_retired_aliases_and_standalone_h_are_unsupported(
@@ -240,7 +251,7 @@ def test_data_retired_aliases_and_standalone_h_are_unsupported(
     diagnostic: str,
 ) -> None:
     """Retired host aliases do not widen the upstream mapped grammar."""
-    monkeypatch.setattr(data_cli, "Configuration", _configuration)
+    monkeypatch.setattr(storages, "Configuration", _configuration)
 
     result = runner.invoke(cli, arguments)
 

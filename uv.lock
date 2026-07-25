@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.10"
 resolution-markers = [
     "python_full_version >= '3.14'",
@@ -160,7 +160,7 @@ requires-dist = [
     { name = "cadcutils", specifier = ">=1.5.4" },
     { name = "click", specifier = ">=8.4.1" },
     { name = "defusedxml", specifier = ">=0.7.1" },
-    { name = "fsspec-cli", git = "https://github.com/shinybrar/vosfs?subdirectory=src%2Ffsspec-cli&rev=fsspec-cli-v0.5.0" },
+    { name = "fsspec-cli", git = "https://github.com/shinybrar/vosfs?subdirectory=src%2Ffsspec-cli&rev=fsspec-cli-v0.6.0" },
     { name = "httpx", extras = ["http2"], specifier = ">=0.28.1" },
     { name = "humanize", specifier = ">=4.12.3" },
     { name = "pydantic", specifier = ">=2.9.2" },
@@ -170,7 +170,7 @@ requires-dist = [
     { name = "rich", specifier = ">=13.9.4" },
     { name = "segno", specifier = ">=1.6.6" },
     { name = "typer", specifier = ">=0.16.0" },
-    { name = "vosfs", git = "https://github.com/shinybrar/vosfs?rev=v0.6.0" },
+    { name = "vosfs", git = "https://github.com/shinybrar/vosfs?rev=v0.7.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -632,7 +632,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -677,8 +677,8 @@ wheels = [
 
 [[package]]
 name = "fsspec-cli"
-version = "0.5.0"
-source = { git = "https://github.com/shinybrar/vosfs?subdirectory=src%2Ffsspec-cli&rev=fsspec-cli-v0.5.0#ddef461b464d41811b6ddbad8eb1a64e37d2d85e" }
+version = "0.6.0"
+source = { git = "https://github.com/shinybrar/vosfs?subdirectory=src%2Ffsspec-cli&rev=fsspec-cli-v0.6.0#fa194eb18d35dbf2c5da67bc0f82ff085b9835ff" }
 dependencies = [
     { name = "fsspec" },
     { name = "typer" },
@@ -846,17 +846,17 @@ resolution-markers = [
     "python_full_version < '3.11'",
 ]
 dependencies = [
-    { name = "colorama", marker = "python_full_version < '3.11' and sys_platform == 'win32'" },
-    { name = "decorator", marker = "python_full_version < '3.11'" },
-    { name = "exceptiongroup", marker = "python_full_version < '3.11'" },
-    { name = "jedi", marker = "python_full_version < '3.11'" },
-    { name = "matplotlib-inline", marker = "python_full_version < '3.11'" },
-    { name = "pexpect", marker = "python_full_version < '3.11' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "prompt-toolkit", marker = "python_full_version < '3.11'" },
-    { name = "pygments", marker = "python_full_version < '3.11'" },
-    { name = "stack-data", marker = "python_full_version < '3.11'" },
-    { name = "traitlets", marker = "python_full_version < '3.11'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "decorator" },
+    { name = "exceptiongroup" },
+    { name = "jedi" },
+    { name = "matplotlib-inline" },
+    { name = "pexpect", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "prompt-toolkit" },
+    { name = "pygments" },
+    { name = "stack-data" },
+    { name = "traitlets" },
+    { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/40/18/f8598d287006885e7136451fdea0755af4ebcbfe342836f24deefaed1164/ipython-8.39.0.tar.gz", hash = "sha256:4110ae96012c379b8b6db898a07e186c40a2a1ef5d57a7fa83166047d9da7624", size = 5513971, upload-time = "2026-03-27T10:02:13.94Z" }
 wheels = [
@@ -872,18 +872,18 @@ resolution-markers = [
     "python_full_version >= '3.11' and python_full_version < '3.14'",
 ]
 dependencies = [
-    { name = "colorama", marker = "python_full_version >= '3.11' and sys_platform == 'win32'" },
-    { name = "decorator", marker = "python_full_version >= '3.11'" },
-    { name = "ipython-pygments-lexers", marker = "python_full_version >= '3.11'" },
-    { name = "jedi", marker = "python_full_version >= '3.11'" },
-    { name = "matplotlib-inline", marker = "python_full_version >= '3.11'" },
-    { name = "pexpect", marker = "python_full_version >= '3.11' and sys_platform != 'emscripten' and sys_platform != 'win32'" },
-    { name = "prompt-toolkit", marker = "python_full_version >= '3.11'" },
-    { name = "psutil", marker = "python_full_version >= '3.11' and sys_platform != 'cygwin' and sys_platform != 'emscripten'" },
-    { name = "pygments", marker = "python_full_version >= '3.11'" },
-    { name = "stack-data", marker = "python_full_version >= '3.11'" },
-    { name = "traitlets", marker = "python_full_version >= '3.11'" },
-    { name = "typing-extensions", marker = "python_full_version == '3.11.*'" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "decorator" },
+    { name = "ipython-pygments-lexers" },
+    { name = "jedi" },
+    { name = "matplotlib-inline" },
+    { name = "pexpect", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "prompt-toolkit" },
+    { name = "psutil", marker = "sys_platform != 'cygwin' and sys_platform != 'emscripten'" },
+    { name = "pygments" },
+    { name = "stack-data" },
+    { name = "traitlets" },
+    { name = "typing-extensions", marker = "python_full_version < '3.12'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/53/59/165d3b4d75cc34add3122c4417ecb229085140ac573103c223cd01dde96f/ipython-9.15.0.tar.gz", hash = "sha256:da2819ce2aa83135257df830660b1176d986c3d2876db24df01974fa955b2756", size = 4442580, upload-time = "2026-06-26T11:03:35.913Z" }
 wheels = [
@@ -895,7 +895,7 @@ name = "ipython-pygments-lexers"
 version = "1.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pygments", marker = "python_full_version >= '3.11'" },
+    { name = "pygments" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ef/4c/5dd1d8af08107f88c7f741ead7a40854b8ac24ddf9ae850afbcf698aa552/ipython_pygments_lexers-1.1.1.tar.gz", hash = "sha256:09c0138009e56b6854f9535736f4171d855c8c08a563a0dcd8022f78355c7e81", size = 8393, upload-time = "2025-01-17T11:24:34.505Z" }
 wheels = [
@@ -2191,8 +2191,8 @@ wheels = [
 
 [[package]]
 name = "vosfs"
-version = "0.6.0"
-source = { git = "https://github.com/shinybrar/vosfs?rev=v0.6.0#200eae23fbc5e2bd58693b5c14ce12b2795d0636" }
+version = "0.7.0"
+source = { git = "https://github.com/shinybrar/vosfs?rev=v0.7.0#d4b8ccd1eee8b774bfb9a8f925b02db7dd09bbd9" }
 dependencies = [
     { name = "defusedxml" },
     { name = "fsspec" },
