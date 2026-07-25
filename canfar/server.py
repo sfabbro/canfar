@@ -106,11 +106,11 @@ def _merge_storage(
     of being duplicated under the Server Name on every rediscovery.
 
     Args:
-        known: Configured VOSpace Services keyed by Storage Name.
-        found: Newly discovered VOSpace Services keyed by Storage Name.
+        known: Configured VOSpace Services keyed by Storage Identifier.
+        found: Newly discovered VOSpace Services keyed by Storage Identifier.
 
     Returns:
-        dict[str, VOSpaceService]: Merged Services keyed by Storage Name.
+        dict[str, VOSpaceService]: Merged Services keyed by Storage Identifier.
     """
     merged = dict(known)
     names = {str(service.uri): name for name, service in known.items()}

@@ -14,12 +14,12 @@ canfar login cadc
 
 ## Address mapped sources
 
-Every operand starts with an `identifier`: the Storage Name of a configured
+Every operand starts with a Storage Identifier: the handle of a configured
 VOSpace Service, or the reserved `local` identifier for the machine where the
 command runs. Operands always pair an identifier with an absolute path:
 
 ```text
-identifier:/absolute/path
+storage-identifier:/absolute/path
 local:/absolute/path
 ```
 

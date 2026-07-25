@@ -14,7 +14,7 @@ from canfar.exceptions.context import AuthContextError
 from canfar.models.active import ActiveConfig
 from canfar.models.config import Configuration
 from canfar.models.http import Server, VOSpaceService
-from canfar.storages import _vospace
+from canfar.storage import _vospace
 from tests.helpers.config import oidc_credential, x509_credential
 
 if TYPE_CHECKING:

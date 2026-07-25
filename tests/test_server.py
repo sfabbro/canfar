@@ -393,7 +393,7 @@ class TestServerDiscovery:
         self,
         tmp_path: Path,
     ) -> None:
-        """Rediscovery updates only the generated Storage Name entry.
+        """Rediscovery updates only the generated Storage Identifier entry.
 
         A Server Name keyed entry saved by an older client is healed to its
         registry leaf (``arc``) on load, so rediscovery refreshes that entry in

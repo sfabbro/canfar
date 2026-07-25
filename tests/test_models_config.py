@@ -85,7 +85,7 @@ class TestConfigurationDefaults:
             assert idp == "cadc"
 
     def test_legacy_server_named_storage_is_healed(self, tmp_path: Path) -> None:
-        """A Storage Name saved as the Server Name is restored to its leaf."""
+        """A Storage Identifier saved as the Server Name is restored to its leaf."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
             "version: 1\n"
@@ -110,7 +110,7 @@ class TestConfigurationDefaults:
         assert str(storage["arc"].url).rstrip("/") == "https://ws-uv.canfar.net/arc"
 
     def test_custom_storage_names_are_not_healed(self, tmp_path: Path) -> None:
-        """Deliberate Storage Names are configuration, not stale defaults."""
+        """Deliberate Storage Identifiers are configuration, not stale defaults."""
         config_path = tmp_path / "config.yaml"
         config_path.write_text(
             "version: 1\n"
@@ -221,10 +221,12 @@ class TestConfigurationValidation:
     def test_invalid_storage_name_rejected(
         self, storage_name: str, tmp_path: Path
     ) -> None:
-        """Invalid Storage Names fail with the rejected name and constraints."""
+        """Invalid Storage Identifiers fail with the rejected name and constraints."""
         with (
             patch("canfar.models.config.CONFIG_PATH", tmp_path / "config.yaml"),
-            pytest.raises(ValidationError, match="Invalid Storage Name") as exc_info,
+            pytest.raises(
+                ValidationError, match="Invalid Storage Identifier"
+            ) as exc_info,
         ):
             Configuration.model_validate(
                 {
@@ -244,7 +246,7 @@ class TestConfigurationValidation:
         assert repr(storage_name) in str(exc_info.value)
 
     def test_long_storage_name_allowed(self) -> None:
-        """Storage Names do not inherit Server field length limits."""
+        """Storage Identifiers do not inherit Server field length limits."""
         storage_name = "a" * 257
         service = {
             "uri": "ivo://cadc.nrc.ca/arc",
@@ -267,7 +269,7 @@ class TestConfigurationValidation:
     def test_duplicate_storage_name_across_servers_rejected(
         self, tmp_path: Path
     ) -> None:
-        """A Storage Name identifies one service across Science Platform Servers."""
+        """A Storage Identifier names one service across Science Platform Servers."""
         service = VOSpaceService(
             uri="ivo://cadc.nrc.ca/arc",
             url="https://ws-cadc.canfar.net/arc",
@@ -278,7 +280,7 @@ class TestConfigurationValidation:
             pytest.raises(
                 ValidationError,
                 match=(
-                    "Duplicate Storage Name 'shared' in Science Platform Servers "
+                    "Duplicate Storage Identifier 'shared' in Science Platform Servers "
                     "'canfar' and 'srcnet'"
                 ),
             ),
@@ -301,7 +303,7 @@ class TestConfigurationValidation:
 
         with pytest.raises(
             ValidationError,
-            match="Storage Names 'arc' and ' arc ' both normalize to 'arc'",
+            match="Storage Identifiers 'arc' and ' arc ' both normalize to 'arc'",
         ):
             Server(storage={"arc": service, " arc ": service})
 
@@ -485,7 +487,7 @@ class TestConfigurationSerialization:
         assert loaded_oidc.expiry.refresh is None
 
     def test_v1_storage_json_and_yaml_round_trip(self, tmp_path: Path) -> None:
-        """Multiple VOSpace Services retain stable nested Storage Names."""
+        """Multiple VOSpace Services retain stable nested Storage Identifiers."""
         config = Configuration.model_validate(
             _sample_config(
                 servers={

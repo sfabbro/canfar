@@ -37,7 +37,7 @@ def _vospace(
     """Return a fresh authenticated async filesystem source.
 
     Args:
-        name: Storage Name of the configured VOSpace Service.
+        name: Storage Identifier of the configured VOSpace Service.
         token: Runtime bearer token, preferred over any saved credential.
         certificate: Runtime X.509 certificate path.
 
@@ -114,11 +114,11 @@ async def _local() -> AsyncIterator[AbstractFileSystem]:
 def sources() -> dict[str, AsyncFilesystemSource]:
     """Build the mapped storage sources for one data command invocation.
 
-    Every configured VOSpace Service is mapped by its Storage Name, plus the
+    Every configured VOSpace Service is mapped by its Storage Identifier, plus the
     always-available ``local`` filesystem.
 
     Returns:
-        dict[str, AsyncFilesystemSource]: Sources keyed by Storage Name.
+        dict[str, AsyncFilesystemSource]: Sources keyed by Storage Identifier.
     """
     config = Configuration()  # ty: ignore[missing-argument]
     mapped = {

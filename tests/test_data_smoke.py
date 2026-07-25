@@ -14,7 +14,7 @@ from canfar.models.config import Configuration
 
 def _skip(reason: str) -> NoReturn:
     pytest.skip(
-        "live data smoke requires Storage Name 'arc' and a valid saved "
+        "live data smoke requires Storage Identifier 'arc' and a valid saved "
         f"Authentication Record/certificate: {reason}"
     )
 

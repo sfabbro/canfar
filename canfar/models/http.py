@@ -94,7 +94,7 @@ class Server(BaseModel):
     storage: dict[str, VOSpaceService] = Field(
         default_factory=dict,
         title="VOSpace Services",
-        description="VOSpace Services keyed by globally unique Storage Name.",
+        description="VOSpace Services keyed by globally unique Storage Identifier.",
     )
 
     cores: int = Field(
@@ -128,7 +128,7 @@ class Server(BaseModel):
     @field_validator("storage", mode="before")
     @classmethod
     def _validate_storage_names(cls, value: Any) -> Any:
-        """Normalize and validate Storage Names before Pydantic transforms keys."""
+        """Normalize and validate Storage Identifiers before key transforms."""
         if not isinstance(value, dict):
             return value
 
@@ -143,7 +143,7 @@ class Server(BaseModel):
                 name = original_name.strip()
             if name is None or (not name or name == "local" or name.startswith("-")):
                 msg = (
-                    f"Invalid Storage Name {original_name!r}: after whitespace "
+                    f"Invalid Storage Identifier {original_name!r}: after whitespace "
                     "normalization it must be non-empty, differ from reserved 'local', "
                     "contain no colon, NUL, or newline, and not start with '-'."
                 )
@@ -151,7 +151,8 @@ class Server(BaseModel):
             if name in normalized:
                 previous_original_name = original_name_by_normalized_name[name]
                 msg = (
-                    f"Storage Names {previous_original_name!r} and {original_name!r} "
+                    f"Storage Identifiers {previous_original_name!r} and "
+                    f"{original_name!r} "
                     f"both normalize to {name!r}; use unique names."
                 )
                 raise ValueError(msg)

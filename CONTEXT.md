@@ -20,9 +20,9 @@ _Avoid_: Label, alias, key
 Remote astronomical storage service associated with a **Science Platform Server**.
 _Avoid_: Storage backend, filesystem
 
-**Storage Name**:
-Required, globally unique, user-facing handle for one **VOSpace Service**.
-_Avoid_: Server Name, alias, key
+**Storage Identifier**:
+Required, globally unique, user-facing handle for one **VOSpace Service**, used to address it in configuration, commands, and operands such as `arc:/home/user`. The reserved identifier `local` addresses the machine where the command runs.
+_Avoid_: Storage Name, Server Name, alias, key
 
 **Identity Provider (IDP)**:
 Organization that issues user identity for CANFAR authentication.
@@ -78,7 +78,7 @@ _Avoid_: Resource profile, quota
 - A **CANFAR Science Platform** exposes one or more **Science Platform Servers**.
 - A **Science Platform Server** is identified by its **Server Name**; its IVOA URI is discovery metadata, and two Server Names may point at the same endpoint.
 - A **Science Platform Server** can expose multiple **VOSpace Services**.
-- A **VOSpace Service** is identified by its **Storage Name** and uses its parent **Science Platform Server**'s **Identity Provider (IDP)**.
+- A **VOSpace Service** is identified by its **Storage Identifier** and uses its parent **Science Platform Server**'s **Identity Provider (IDP)**.
 - An **Identity Provider (IDP)** can support one or more **Science Platform Servers**.
 - **Authentication** and **Platform** are separate seams with independent ownership.
 - An **Authentication Record** belongs to one **Identity Provider (IDP)**.

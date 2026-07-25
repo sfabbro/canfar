@@ -9,7 +9,7 @@ from fsspec_cli import App
 from typer.core import TyperGroup
 from typer.main import get_group
 
-from canfar.storages import sources
+from canfar.storage import sources
 
 if TYPE_CHECKING:
     from typer._click.core import Command, Context

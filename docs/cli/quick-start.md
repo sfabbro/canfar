@@ -29,7 +29,7 @@ canfar server ls
 
 ## 3. Work with data
 
-The standard installation includes data commands. Use a configured Storage Name
+The standard installation includes data commands. Use a configured Storage Identifier
 or the reserved `local` name with an absolute path. A default CADC login maps
 `arc` and `vault`:
 

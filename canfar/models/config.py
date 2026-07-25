@@ -189,7 +189,7 @@ class Configuration(BaseSettings):
         )
 
     def _heal_default_storage(self) -> None:
-        """Restore default Storage Names on Servers saved by an older client.
+        """Restore default Storage Identifiers on Servers saved by an older client.
 
         Older clients keyed a discovered VOSpace Service by its Server Name, so
         an existing configuration holds ``canfar`` instead of ``arc`` and never
@@ -203,7 +203,7 @@ class Configuration(BaseSettings):
             storage = dict(server.storage)
             legacy = storage.pop(name, None)
             if legacy is None and storage:
-                # Deliberate Storage Names are configuration, not stale defaults.
+                # Deliberate Storage Identifiers are configuration, not stale defaults.
                 continue
             if legacy is not None:
                 leaf = str(legacy.uri).rpartition("/")[2] or name
@@ -218,7 +218,7 @@ class Configuration(BaseSettings):
 
     @model_validator(mode="after")
     def _normalize_and_validate_servers(self) -> Configuration:
-        """Inject Server Names and validate Server and Storage Name keys."""
+        """Inject Server Names and validate Server and Storage Identifier keys."""
         self._heal_default_storage()
         updated: dict[str, Server] = {}
         server_name_by_storage_name: dict[str, str] = {}
@@ -234,7 +234,8 @@ class Configuration(BaseSettings):
                     storage_name
                 ):
                     msg = (
-                        f"Duplicate Storage Name '{storage_name}' in Science Platform "
+                        f"Duplicate Storage Identifier '{storage_name}' in "
+                        "Science Platform "
                         f"Servers '{previous_server_name}' and '{name}'."
                     )
                     raise ValueError(msg)
@@ -380,18 +381,19 @@ class Configuration(BaseSettings):
         return self.servers[name]
 
     def _resolve_storage(self, storage_name: str) -> tuple[str, str]:
-        """Resolve a Storage Name to its endpoint and parent server IDP."""
+        """Resolve a Storage Identifier to its endpoint and parent server IDP."""
         for server in self.servers.values():
             service = server.storage.get(storage_name)
             if service is not None:
                 if server.idp is None:
                     msg = (
-                        f"Storage Name '{storage_name}' belongs to a Science Platform "
+                        f"Storage Identifier '{storage_name}' belongs to a "
+                        "Science Platform "
                         "Server without an IDP."
                     )
                     raise ValueError(msg)
                 return str(service.url), server.idp
-        msg = f"Storage Name '{storage_name}' is not configured."
+        msg = f"Storage Identifier '{storage_name}' is not configured."
         raise KeyError(msg)
 
     def upsert_credential(self, credential: AuthenticationCredential) -> None:

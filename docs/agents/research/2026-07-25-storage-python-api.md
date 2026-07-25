@@ -22,7 +22,7 @@ from canfar.storage import filesystem, fetch, sources
 ```
 
 - `filesystem(name, *, cache=False, asynchronous=False, token=None, certificate=None)`
-  returns a ready `AbstractFileSystem` for one Storage Name.
+  returns a ready `AbstractFileSystem` for one Storage Identifier.
 - `fetch(name, path, *, cache=True)` materializes one remote object and returns its
   local `Path`.
 - `sources()` is the existing fsspec-cli seam, moved unchanged.
@@ -46,7 +46,7 @@ in `docs/cli/data.md`:
 
 The sync/async tension resolves cleanly and is already half-solved in the repository:
 build `VOSpaceFileSystem` synchronously, wrap it in the sync cache, and re-expose it
-with `AsyncFileSystemWrapper` — the same class `canfar/storages.py:108` already uses
+with `AsyncFileSystemWrapper` — the same class `canfar/storage.py:108` already uses
 for `local`. This was verified end to end (§4, §9).
 
 `docs/cli/data.md:143-165` should be corrected regardless of whether this API ships.
@@ -70,16 +70,16 @@ the two public read-only test objects
 
 | Element | Location |
 | --- | --- |
-| `_vospace(name, *, token, certificate)` factory | `canfar/storages.py:31-98` |
-| `_local()` async wrapper over `LocalFileSystem` | `canfar/storages.py:101-111` |
-| `sources() -> dict[str, AsyncFilesystemSource]` | `canfar/storages.py:114-130` |
+| `_vospace(name, *, token, certificate)` factory | `canfar/storage.py:31-98` |
+| `_local()` async wrapper over `LocalFileSystem` | `canfar/storage.py:101-111` |
+| `sources() -> dict[str, AsyncFilesystemSource]` | `canfar/storage.py:114-130` |
 | Only consumer | `canfar/cli/data.py:12,22-33` |
 | `AsyncFilesystemSource = Callable[[], AbstractAsyncContextManager[AbstractFileSystem]]` | `.venv/lib/python3.13/site-packages/fsspec_cli/_app.py:41-43` |
-| Storage Name → endpoint + IDP | `canfar/models/config.py:382-395` |
+| Storage Identifier → endpoint + IDP | `canfar/models/config.py:382-395` |
 | Credential materialization (async) | `canfar/client.py:234-262` |
 | Runtime dependencies | `pyproject.toml:48-65` |
 
-DOCUMENTED. `canfar/storages.py` is not exported from `canfar/__init__.py:16-31`; its
+DOCUMENTED. `canfar/storage.py` is not exported from `canfar/__init__.py:16-31`; its
 only non-test importer is `canfar/cli/data.py:12`. `docs/cli/data.md:176` states the
 release "intentionally provides no public CANFAR storage Python API". The module is
 therefore free to be renamed.
@@ -164,7 +164,7 @@ behaves identically for network cost: 1.40 s for the same header read.
 
 ## 3. Import surface: `canfar.storage`, singular
 
-**Recommendation: rename `canfar/storages.py` to `canfar/storage.py` and make it the
+**Recommendation: rename `canfar/storage.py` to `canfar/storage.py` and make it the
 public module.**
 
 Rationale, all DOCUMENTED:
@@ -179,7 +179,7 @@ Rationale, all DOCUMENTED:
   storages` references in `tests/test_cli_data.py`. No published API breaks, because
   `docs/cli/data.md:176` says none exists.
 
-Do **not** add a compatibility shim re-exporting `canfar.storages`. There is nothing
+Do **not** add a compatibility shim re-exporting `canfar.storage`. There is nothing
 to be compatible with.
 
 ### What belongs in it — and what does not
@@ -204,7 +204,7 @@ _strip_protocol('vos://cadc-west-01.canfar.net/vault/ALMA/…/test-4d-cube-cutou
 
 The authority is silently swallowed into the path. A `canfar` resolver that emitted
 `vos://` URLs would produce strings that look addressable and are not. In Python the
-Storage Name and the path are already two arguments; a resolver adds a failure mode
+Storage Identifier and the path are already two arguments; a resolver adds a failure mode
 and removes nothing. The CLI's `identifier:/path` operand syntax
 (`docs/cli/data.md:17-24`) is a *command-line* affordance and should stay there.
 
@@ -246,7 +246,7 @@ wrapped = AsyncFileSystemWrapper(cached, asynchronous=True)
 
 DOCUMENTED. `fsspec/implementations/asyn_wrapper.py:11-36` wraps each sync method with
 `asyncio.to_thread`, which is why the loop stays responsive. Its class declaration is
-`fsspec/implementations/asyn_wrapper.py:39`. `canfar/storages.py:108` already uses this
+`fsspec/implementations/asyn_wrapper.py:39`. `canfar/storage.py:108` already uses this
 class for `local`, so it is not a new concept in this codebase. fsspec's own docs call
 it "experimental" and warn "Users should not expect this wrapper to magically make
 things faster" (<https://filesystem-spec.readthedocs.io/en/latest/async.html>) — the
@@ -290,13 +290,13 @@ VERIFIED. Per-call latency against `vault`:
 | worst first-call outlier observed across all runs | 14.3 s |
 
 The current `sources()` design builds and closes a filesystem per command
-(`canfar/storages.py:93-96`), which is right for a CLI. A Python API should hand back a
+(`canfar/storage.py:93-96`), which is right for a CLI. A Python API should hand back a
 *reusable* instance so callers pay service-binding discovery once. Note the outliers:
 first-call cost is not deterministic, so do not document a fixed number.
 
 DOCUMENTED. `vosfs/filesystem.py:73-75` sets `protocol = "vos"` and `cachable = True`.
 VERIFIED: `fsspec.filesystem("vos", endpoint_url=…, certfile=…)` twice returns the
-identical object; `skip_instance_cache=True` defeats it. `canfar/storages.py:76,88`
+identical object; `skip_instance_cache=True` defeats it. `canfar/storage.py:76,88`
 already passes `skip_instance_cache=True`. **Keep that** for the returned instance:
 fsspec's instance cache is keyed on the storage options, and a cached instance would
 outlive a token refresh.
@@ -446,13 +446,13 @@ VERIFIED sketch (ran correctly on this host, falling back to the temp dir becaus
 
 ```python
 def _cache_location(name: str) -> Path:
-    """Return the default cache directory for one Storage Name.
+    """Return the default cache directory for one Storage Identifier.
 
     Prefers the CANFAR Science Platform Server's per-Session ``/scratch`` volume,
     which is fast local disk and is cleared when the Session ends.
 
     Args:
-        name: Storage Name of the configured VOSpace Service.
+        name: Storage Identifier of the configured VOSpace Service.
 
     Returns:
         Path: Writable directory for cached objects.
@@ -462,7 +462,7 @@ def _cache_location(name: str) -> Path:
     return root / "canfar" / name
 ```
 
-Keying by Storage Name matters: `fsspec`'s cache mapper hashes the *stripped* path
+Keying by Storage Identifier matters: `fsspec`'s cache mapper hashes the *stripped* path
 (`fsspec/implementations/cached.py:627`), which does not include the endpoint, so
 `arc:/x` and `vault:/x` would otherwise collide in one directory.
 
@@ -516,7 +516,7 @@ def fetch(name: str, path: str, *, cache: bool | str | Path = True) -> Path:
     """Materialize one VOSpace object locally and return its path.
 
     Args:
-        name: Storage Name of the configured VOSpace Service.
+        name: Storage Identifier of the configured VOSpace Service.
         path: Absolute path within that VOSpace Service.
         cache: Cache location, or ``True`` for the default (see ``filesystem``).
 
@@ -557,7 +557,7 @@ Reasons:
 `Callable[[], AbstractAsyncContextManager[AbstractFileSystem]]`
 (`fsspec_cli/_app.py:41-43`), it must yield an async filesystem, and it must build and
 `aclose()` per command so a listing cache cannot outlive its command
-(`canfar/storages.py:93-96`, `docs/cli/data.md:106-110`).
+(`canfar/storage.py:93-96`, `docs/cli/data.md:106-110`).
 
 Refactor `_vospace` to delegate to the new `filesystem()` rather than duplicating
 construction:
@@ -619,10 +619,10 @@ def filesystem(
     token: str | SecretStr | None = None,
     certificate: Path | None = None,
 ) -> AbstractFileSystem:
-    """Return an authenticated filesystem for one Storage Name.
+    """Return an authenticated filesystem for one Storage Identifier.
 
     Args:
-        name: Storage Name of the configured VOSpace Service.
+        name: Storage Identifier of the configured VOSpace Service.
         cache: ``False`` for no caching, ``True`` for the default cache
             directory, a path for an explicit one, or a sequence of paths
             tried in order where only the last is writable.
@@ -651,7 +651,7 @@ def fetch(
 
 def sources() -> dict[str, AsyncFilesystemSource]:
     """Build the mapped storage sources for one data command invocation."""
-    # unchanged from canfar/storages.py:114-130
+    # unchanged from canfar/storage.py:114-130
 ```
 
 Construction body, matching the rule table in §4:
@@ -815,7 +815,7 @@ which does group multiple ranges of one object into a single download
 
 ## Primary sources
 
-- `canfar/storages.py`, `canfar/cli/data.py`, `canfar/client.py`,
+- `canfar/storage.py`, `canfar/cli/data.py`, `canfar/client.py`,
   `canfar/models/config.py`, `pyproject.toml`, `uv.lock`, `CONTEXT.md`, `AGENTS.md`,
   `docs/cli/data.md` (repository snapshot `ba5493fd`)
 - `.venv/lib/python3.13/site-packages/vosfs/filesystem.py`, `.../vosfs/staging.py`,
