@@ -248,6 +248,7 @@ nav:
       - Examples:
           - Basic: client/examples.md
           - Advanced: client/advanced-examples.md
+      - Data Access: client/data.md
       - Reference:
           - Python API:
               - AsyncSession: client/async_session.md
