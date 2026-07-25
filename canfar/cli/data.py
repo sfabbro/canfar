@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 _DATA_GROUP_META_KEY = "canfar.data_group"
 
 
-def _upstream_group() -> TyperGroup:
+def group() -> TyperGroup:
     """Build the released upstream application with CANFAR policy.
 
     Returns:
@@ -36,12 +36,12 @@ class _DataGroup(TyperGroup):
 
     @staticmethod
     def _delegate(ctx: Context) -> TyperGroup:
-        group = ctx.meta.get(_DATA_GROUP_META_KEY)
-        if group is None:
-            group = _upstream_group()
-            ctx.meta[_DATA_GROUP_META_KEY] = group
-        assert isinstance(group, TyperGroup)
-        return group
+        resolved = ctx.meta.get(_DATA_GROUP_META_KEY)
+        if resolved is None:
+            resolved = group()
+            ctx.meta[_DATA_GROUP_META_KEY] = resolved
+        assert isinstance(resolved, TyperGroup)
+        return resolved
 
     def list_commands(self, ctx: Context) -> list[str]:
         """List the unchanged upstream commands."""

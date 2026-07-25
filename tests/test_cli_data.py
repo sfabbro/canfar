@@ -89,8 +89,8 @@ def test_upstream_app_receives_configured_sources_and_policy(monkeypatch) -> Non
     monkeypatch.setattr(storages, "_vospace", source_factory)
     monkeypatch.setattr(data_cli, "App", FakeApp)
 
-    data_cli._upstream_group()  # noqa: SLF001
-    data_cli._upstream_group()  # noqa: SLF001
+    data_cli.group()
+    data_cli.group()
 
     assert [set(sources) for sources in captured_sources] == [
         {"arc", "cavern", "local"},
@@ -210,7 +210,7 @@ def test_recursion_capability_omits_rm_flags_but_keeps_cp_flags(
 ) -> None:
     """The recursion capability registers ``cp`` flags and withholds ``rm`` ones."""
     monkeypatch.setattr(storages, "Configuration", _configuration)
-    group = data_cli._upstream_group()  # noqa: SLF001
+    group = data_cli.group()
     context = click.Context(group)
 
     def options(command: str) -> set[str]:

@@ -41,7 +41,7 @@ class RegistryEvidence(BaseModel):
     available: bool
 
 
-class EnrichmentWorkers(BaseModel):
+class Enrichment(BaseModel):
     """Isolated worker configs with one pre-materialized runtime credential.
 
     Attributes:
@@ -243,7 +243,7 @@ async def enrich(
     *,
     endpoint: RegistryResource,
     count: int,
-) -> EnrichmentWorkers | None:
+) -> Enrichment | None:
     """Materialize credentials once, then isolate worker configuration state.
 
     Args:
@@ -253,7 +253,7 @@ async def enrich(
         count: Number of isolated worker configurations to produce.
 
     Returns:
-        EnrichmentWorkers | None: Workers, or None when credentials are absent
+        Enrichment | None: Workers, or None when credentials are absent
         or unusable.
     """
     from canfar.client import HTTPClient  # noqa: PLC0415
@@ -284,4 +284,4 @@ async def enrich(
 
     values = base_config.model_dump(mode="python")
     configs = tuple(Configuration.model_validate(values) for _ in range(count))
-    return EnrichmentWorkers(configs=configs, token=token, certificate=certificate)
+    return Enrichment(configs=configs, token=token, certificate=certificate)
