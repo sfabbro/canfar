@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import click
 import pytest
 import typer
 from typer.testing import CliRunner
@@ -202,7 +203,23 @@ def test_data_recursive_remove_is_disabled(
 
     assert result.exit_code == 2
     assert result.stdout == ""
-    assert f"No such option: {flag}" in result.stderr
+
+
+def test_recursion_capability_omits_rm_flags_but_keeps_cp_flags(
+    monkeypatch,
+) -> None:
+    """The recursion capability registers ``cp`` flags and withholds ``rm`` ones."""
+    monkeypatch.setattr(storages, "Configuration", _configuration)
+    group = data_cli._upstream_group()  # noqa: SLF001
+    context = click.Context(group)
+
+    def options(command: str) -> set[str]:
+        resolved = group.get_command(context, command)
+        assert resolved is not None
+        return {option for param in resolved.params for option in param.opts}
+
+    assert not options("rm") & {"-R", "-r"}
+    assert {"-R", "-r"} <= options("cp")
 
 
 def test_data_cross_source_move_retains_upstream_rejection(monkeypatch) -> None:
