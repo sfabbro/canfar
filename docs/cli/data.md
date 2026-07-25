@@ -100,6 +100,73 @@ supported workflow in this release. Any future one-command relocation would be a
 separately named, opt-in orchestration feature with stronger destination
 verification and residual-state semantics—not portable `mv`.
 
+## Cache data locally
+
+### Directory listings
+
+Directory listings are cached automatically. Each command builds and closes its
+own filesystem, so a cached listing only ever serves the command that produced
+it and can never return a listing that outlives it. Repeated lookups while one
+command walks a tree are served without another round trip.
+
+### Files and byte ranges
+
+There is no CLI flag for caching file contents, but `vosfs` is a normal
+[fsspec](https://filesystem-spec.readthedocs.io/) filesystem, so any fsspec
+cache can wrap it from Python. On a CANFAR session, `/scratch` is fast local
+disk and is the right place to point a cache; it is not backed up and is
+cleared when the session ends, which is exactly what a cache wants.
+
+Cache whole files under a named directory. The first read fetches over the
+network, and later reads come from `/scratch`:
+
+```python
+from pathlib import Path
+
+from fsspec.implementations.cached import WholeFileCacheFileSystem
+from vosfs import VOSpaceFileSystem
+
+vault = VOSpaceFileSystem(
+    "https://cadc-west-01.canfar.net/vault",
+    certfile=str(Path.home() / ".ssl" / "cadcproxy.pem"),
+)
+cached = WholeFileCacheFileSystem(fs=vault, cache_storage="/scratch/vault-cache")
+
+data = cached.cat_file("/ALMA/test-data/cutouts/test-4d-cube-cutout.fits")
+```
+
+Use `SimpleCacheFileSystem` instead when you do not need the expiry and
+staleness metadata that `WholeFileCacheFileSystem` keeps. Passing
+`cache_storage` a list of directories tries each in order and treats only the
+last as writable, so a shared read-only cache can back your own.
+
+VOSpace supports ranged reads, so a large cube can be cached one block at a
+time rather than downloaded whole. `MMapCache` keeps fetched blocks in a sparse
+file, so only the blocks you touch occupy disk:
+
+```python
+from fsspec.caching import MMapCache
+
+path = "/ALMA/test-data/cutouts/test-4d-cube.fits"
+size = vault.info(path)["size"]
+blocks = MMapCache(
+    blocksize=1 << 20,
+    fetcher=lambda start, end: vault.cat_file(path, start, end),
+    size=size,
+    location="/scratch/vault-cache/test-4d-cube.blocks",
+)
+
+header = blocks._fetch(0, 2880)  # one FITS header block, one 1 MiB fetch
+```
+
+Reading a FITS header this way transfers a single block instead of the whole
+file, and a second read of the same range is served from `/scratch`. Ranged
+reads help most on large files; on small ones the per-request VOSpace transfer
+negotiation dominates.
+
+These caches use the synchronous filesystem interface. Build the filesystem
+without `asynchronous=True`, as above.
+
 ## Output and accepted omissions
 
 Data command stdout belongs to the embedded command; CANFAR does not prepend
