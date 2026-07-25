@@ -140,23 +140,49 @@ staleness metadata that `WholeFileCacheFileSystem` keeps. Passing
 `cache_storage` a list of directories tries each in order and treats only the
 last as writable, so a shared read-only cache can back your own.
 
-### Do not cache byte ranges
+### Cache byte ranges
 
-Cache whole files, never blocks. `vosfs` sends no HTTP `Range` header, so a
-partial read such as `cat_file(path, start, end)` downloads the whole object
-and slices it in memory. A block cache therefore turns one download into one
-download *per block*: reading three headers out of a cube fetches that cube
-three times.
+`vosfs` sends an HTTP `Range` header and uses the response when the byte
+endpoint answers `206`, so a partial read such as `cat_file(path, start, end)`
+transfers only the bytes you asked for. Range support is per-backend:
 
-This is a client limitation, and it is not uniform across services. The `vault`
-backend does serve ranges — a direct request returns `206` with
-`Accept-Ranges: bytes` — while `arc` returns the whole body and advertises no
-range support. So genuine byte-range reads are possible against `vault` today
-only by bypassing `vosfs`, and teaching `vosfs` to send `Range` would unlock
-them properly for `vault` but not for `arc`.
+| Storage Identifier | Backend | Ranged reads |
+| --- | --- | --- |
+| `vault` | `minoc` | Yes — a partial read returns `206` and transfers only that slice |
+| `arc` | Cavern | No — the whole object is fetched and sliced, which is correct but not cheaper |
 
-Avoid `MMapCache` and any block-cache layer over a VOSpace Service until then.
-`blockcache` refuses outright, which is the safer failure:
+Because a range is now a real partial transfer against `vault`, a block cache
+is worth using there. `MMapCache` keeps fetched blocks in a sparse file, so
+only the blocks you touch occupy disk:
+
+```python
+from fsspec.caching import MMapCache
+
+path = "/ALMA/test-data/cutouts/test-4d-cube.fits"
+size = vault.info(path)["size"]
+blocks = MMapCache(
+    blocksize=1 << 20,
+    fetcher=lambda start, end: vault.cat_file(path, start, end),
+    size=size,
+    location="/scratch/vault-cache/test-4d-cube.blocks",
+)
+
+header = blocks._fetch(0, 2880)  # one FITS header block, one 1 MiB range request
+```
+
+Reading a FITS header from a 3.4 MB cube this way issues a single ranged
+request and materialises one block of four; a second read of the same range is
+served from `/scratch`. The saving is in bytes transferred rather than seconds
+on small files, because VOSpace transfer negotiation dominates a short request.
+It grows with file size, and matters most when many reads hit different parts
+of one large cube.
+
+Against `arc` a block cache still costs a whole download per block, so cache
+whole files there instead.
+
+The `blockcache` filesystem remains unavailable over a VOSpace Service. `Range`
+is honoured for byte reads, not through the file-object path, so wrapping
+`CachingFileSystem` still fails:
 
 ```text
 AttributeError: 'StagedReadFile' object has no attribute 'blocksize'
@@ -183,8 +209,8 @@ or cross-source `mv` workflow.
 ## Upstream releases
 
 CANFAR installs pinned, tagged releases of
-[`vosfs`](https://github.com/shinybrar/vosfs/releases/tag/v0.7.0) and
-[`fsspec-cli`](https://github.com/shinybrar/vosfs/releases/tag/fsspec-cli-v0.6.0).
+[`vosfs`](https://github.com/shinybrar/vosfs/releases/tag/v0.8.0) and
+[`fsspec-cli`](https://github.com/shinybrar/vosfs/releases/tag/fsspec-cli-v0.7.0).
 CANFAR tests its composition, configuration, authentication, and output seams;
 exhaustive filesystem-command and backend matrices remain in the upstream
 project.

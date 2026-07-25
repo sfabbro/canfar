@@ -3,10 +3,38 @@
 - **Date:** 2026-07-25
 - **Repository snapshot:** `ba5493fd` on `feat/vosfs-support`
 - **fsspec evaluated:** `2026.6.0`
-- **vosfs evaluated:** `0.7.0`
-- **fsspec-cli evaluated:** `0.6.0`
+- **vosfs evaluated:** `0.7.0` (see the 0.8.0 update below)
+- **fsspec-cli evaluated:** `0.6.0` (see the 0.7.0 update below)
 - **Python:** `3.13.5`
 - **Question:** How should `canfar` conveniently expose VOSpace storage for Python API access?
+
+## Update, 2026-07-25 (later the same day): byte ranges now work on `vault`
+
+This note was written against `vosfs` 0.7.0. Upstream
+[shinybrar/vosfs#334](https://github.com/shinybrar/vosfs/issues/334), filed from
+this research, was fixed in
+[#335](https://github.com/shinybrar/vosfs/issues/335) and released as
+`vosfs` 0.8.0 / `fsspec-cli` 0.7.0, which `canfar` now pins.
+
+What changed, VERIFIED against the live service on 0.8.0:
+
+- `cat_file(path, start, end)` now sends `Range` and uses a `206` response.
+  Observed on `vault`: `Range: bytes=0-2879` -> `HTTP 206`,
+  `Content-Range: bytes 0-2879/3542400`, 2880 bytes returned.
+- `MMapCache` over a `cat_file` fetcher is now genuinely partial: one ranged
+  request, one block of four materialised, zero whole-object fallbacks. Section
+  4 below measured the opposite on 0.7.0 and is superseded for `vault`.
+- `arc` (Cavern) still serves no ranges and falls back to a whole-object read
+  that is sliced. Slices remain correct (VERIFIED), so the "cache whole files"
+  guidance still holds there.
+- `blockcache` / `CachingFileSystem` still fails with
+  `AttributeError: 'StagedReadFile' object has no attribute 'blocksize'`.
+  `Range` is honoured for byte reads, not through the file-object path.
+
+Sections 2 and 4 describe the 0.7.0 behaviour and are kept as the historical
+record. The single-cache-layer recommendation in the Verdict stands, but its
+stated reason ("the second tier is either dead or fictional") now applies only
+to `arc`; on `vault` a block cache over `MMapCache` is a real option.
 
 ## Verdict
 
