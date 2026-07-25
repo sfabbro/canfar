@@ -140,29 +140,23 @@ staleness metadata that `WholeFileCacheFileSystem` keeps. Passing
 `cache_storage` a list of directories tries each in order and treats only the
 last as writable, so a shared read-only cache can back your own.
 
-VOSpace supports ranged reads, so a large cube can be cached one block at a
-time rather than downloaded whole. `MMapCache` keeps fetched blocks in a sparse
-file, so only the blocks you touch occupy disk:
+### Do not cache byte ranges
 
-```python
-from fsspec.caching import MMapCache
+Cache whole files, never blocks. OpenCADC Cavern does not implement HTTP byte
+ranges, so every partial read downloads the whole object and slices it in
+memory. A block cache therefore turns one download into one download *per
+block*: reading three headers out of a cube fetches that cube three times.
 
-path = "/ALMA/test-data/cutouts/test-4d-cube.fits"
-size = vault.info(path)["size"]
-blocks = MMapCache(
-    blocksize=1 << 20,
-    fetcher=lambda start, end: vault.cat_file(path, start, end),
-    size=size,
-    location="/scratch/vault-cache/test-4d-cube.blocks",
-)
+Avoid `MMapCache` and any block-cache layer over a VOSpace Service for this
+reason. `blockcache` refuses outright, which is the safer failure:
 
-header = blocks._fetch(0, 2880)  # one FITS header block, one 1 MiB fetch
+```text
+AttributeError: 'StagedReadFile' object has no attribute 'blocksize'
 ```
 
-Reading a FITS header this way transfers a single block instead of the whole
-file, and a second read of the same range is served from `/scratch`. Ranged
-reads help most on large files; on small ones the per-request VOSpace transfer
-negotiation dominates.
+Stacked caches do not help either: chaining them (`filecache::simplecache::`)
+builds the layers, but the inner layer is never filled and never serves, so use
+exactly one cache layer on your fastest local disk.
 
 These caches use the synchronous filesystem interface. Build the filesystem
 without `asynchronous=True`, as above.
