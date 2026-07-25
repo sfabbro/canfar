@@ -201,10 +201,13 @@ Data command stdout belongs to the embedded command; CANFAR does not prepend
 the active-Server banner or add JSON/YAML envelopes. Diagnostics are written to
 stderr.
 
-This release intentionally provides no public CANFAR storage Python API, FUSE
-mount, signed-URL extension, progress display, confirmation prompt, `:/path` or
-bare-path shorthand, `active` alias, `canfar storage` alias, recursive removal,
-or cross-source `mv` workflow.
+The Python equivalent of these commands is documented in
+[Data Access](../client/data.md).
+
+This release intentionally provides no FUSE mount, signed-URL extension,
+progress display, confirmation prompt, `:/path` or bare-path shorthand,
+`active` alias, `canfar storage` alias, recursive removal, or cross-source `mv`
+workflow.
 
 ## Upstream releases
 

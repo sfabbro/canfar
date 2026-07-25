@@ -6,41 +6,38 @@ endpoints and credentials; [`vosfs`](https://github.com/shinybrar/vosfs) is the
 so every tool that already speaks fsspec — astropy, pandas, dask, zarr — works
 without an adapter.
 
-!!! note "There is no `canfar.storage` module yet"
-
-    This release ships no public CANFAR storage API. The supported way to reach
-    a VOSpace Service from Python is to resolve it from your configuration and
-    hand the endpoint to `vosfs`, as below. The equivalent CLI surface is
-    documented in [Data commands](../cli/data.md).
+The same Storage Identifiers the CLI uses are importable by name.
 
 ## Open a Storage Service
 
-A Storage Identifier (`arc`, `vault`, or the reserved `local`) names one
-service. Resolve its endpoint and your saved credential from configuration
-rather than hard-coding them:
+Import a Storage Identifier and you get a ready, authenticated filesystem. Run
+`canfar login` first; the credential resolution is the same one the CLI uses.
 
 ```python
-from canfar.models.config import Configuration
-from vosfs import VOSpaceFileSystem
-
-config = Configuration()
-service = config.servers["canfar"].storage["vault"]
-credential = config.get_credential("cadc")
-
-vault = VOSpaceFileSystem(str(service.url), certfile=str(credential.path))
+from canfar.storage import arc, vault, local
 ```
 
-For a token Identity Provider pass `token=` instead of `certfile=`. Run
-`canfar login` first; the credential is whatever that stored.
-
-Swap `"vault"` for `"arc"` to reach the other service. To see what is
-configured:
+Any configured Storage Identifier works this way. To see which are available:
 
 ```python
-for server in config.servers.values():
-    for identifier, vospace in server.storage.items():
-        print(identifier, vospace.url)
+from canfar.storage import identifiers
+
+identifiers()      # ['arc', 'vault', 'local']
 ```
+
+Import binds the filesystem once, which is what you usually want. To build one
+explicitly — to override a credential, or to name an identifier held in a
+variable — use `filesystem`:
+
+```python
+from canfar.storage import filesystem
+
+vault = filesystem("vault")
+staging = filesystem("vault", token="...")        # runtime bearer token
+archive = filesystem("arc", certificate="/path/to/proxy.pem")
+```
+
+`local` is reserved for the machine your code runs on and needs no credential.
 
 ## Filesystem operations
 
@@ -82,6 +79,16 @@ object can serve a stale listing; build a fresh one, or pass
 
 Some libraries want a real path rather than a file object — anything that
 memory-maps, or a C extension that opens by name. Materialise the file:
+
+```python
+from canfar.storage import fetch
+
+path = fetch("vault", target, "/scratch/cutout.fits")
+```
+
+`fetch` returns the local `Path`. Omit the destination to write into the
+current directory under the object's own name. The underlying filesystem
+method works too:
 
 ```python
 vault.get_file(target, "/scratch/cutout.fits")
@@ -260,13 +267,17 @@ use the underscore-prefixed coroutines, and close it when done:
 
 ```python
 import asyncio
+
+from canfar.models.config import Configuration
 from vosfs import VOSpaceFileSystem
 
 
 async def main() -> None:
+    config = Configuration()
+    service = config.servers["canfar"].storage["vault"]
     vault = VOSpaceFileSystem(
         str(service.url),
-        certfile=str(credential.path),
+        certfile=str(config.get_credential("cadc").path),
         asynchronous=True,
     )
     try:

@@ -8,8 +8,10 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 import vosfs
+from fsspec.implementations.local import LocalFileSystem
 from pydantic import AnyHttpUrl, AnyUrl
 
+from canfar import storage
 from canfar.exceptions.context import AuthContextError
 from canfar.models.active import ActiveConfig
 from canfar.models.config import Configuration
@@ -34,7 +36,7 @@ class _Filesystem:
     def __init__(self, endpoint: str, **kwargs: Any) -> None:
         self.endpoint = endpoint
         self.kwargs = kwargs
-        self.asynchronous = kwargs["asynchronous"]
+        self.asynchronous = kwargs.get("asynchronous", False)
         self.closed = False
 
     async def aclose(self) -> None:
@@ -385,3 +387,58 @@ async def test_empty_saved_oidc_token_fails_cleanly(
             pass
 
     constructor.assert_not_called()
+
+
+class TestPublicSurface:
+    """Tests for the public Storage Identifier accessors."""
+
+    def test_identifiers_lists_configured_services_and_local(self) -> None:
+        """Every configured Storage Identifier is listed, with local last."""
+        _config(credential=x509_credential("inactive")).save()
+
+        assert storage.identifiers() == ["archive", "local"]
+
+    def test_local_identifier_returns_a_local_filesystem(self) -> None:
+        """The reserved local identifier needs no credential."""
+        assert isinstance(storage.filesystem("local"), LocalFileSystem)
+        assert isinstance(storage.local, LocalFileSystem)
+
+    def test_attribute_access_builds_a_filesystem(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A Storage Identifier resolves as a module attribute."""
+        certificate = tmp_path / "saved.pem"
+        _config(credential=x509_credential("inactive", path=certificate)).save()
+        monkeypatch.setattr(
+            "canfar.client.x509.inspect",
+            lambda path: {"path": path.as_posix(), "expiry": 9_999_999_999.0},
+        )
+        monkeypatch.setattr(vosfs, "VOSpaceFileSystem", _Filesystem)
+
+        filesystem = storage.archive
+
+        assert filesystem.endpoint == "https://inactive.example/vospace"
+        assert filesystem.kwargs["certfile"] == certificate.as_posix()
+        assert filesystem.kwargs["use_listings_cache"] is True
+
+    def test_unknown_identifier_raises_attribute_error(self) -> None:
+        """An unconfigured name is an AttributeError naming what is available."""
+        _config(credential=x509_credential("inactive")).save()
+
+        with pytest.raises(AttributeError, match="archive"):
+            _ = storage.missing
+
+    def test_private_names_are_not_treated_as_identifiers(self) -> None:
+        """Dunder lookups must not attempt a filesystem build."""
+        with pytest.raises(AttributeError):
+            _ = storage.__wrapped__
+
+    def test_dir_offers_identifiers_for_completion(self) -> None:
+        """Tab completion exposes identifiers alongside the module functions."""
+        _config(credential=x509_credential("inactive")).save()
+
+        listed = dir(storage)
+
+        assert {"archive", "local", "filesystem", "fetch", "identifiers"} <= set(listed)
