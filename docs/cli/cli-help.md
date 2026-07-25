@@ -191,7 +191,7 @@ canfar data ls -lh arc:/home/[username]
 canfar data cp local:/absolute/path/file.fits arc:/home/[username]/file.fits
 ```
 
-Data operands use explicit `Storage-Name:/absolute/path` or
+Data operands use explicit `identifier:/absolute/path` or
 `local:/absolute/path` syntax. See [Data commands](data.md) for recursive copy,
 cross-source copy and verification, recursive-removal policy, and the exact
 supported boundary.
