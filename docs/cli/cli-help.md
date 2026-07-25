@@ -187,8 +187,8 @@ options.
 ## Data
 
 ```bash
-canfar data ls -lh canfar:/
-canfar data cp local:/absolute/path/file.fits canfar:/folder/file.fits
+canfar data ls -lh arc:/home/[username]
+canfar data cp local:/absolute/path/file.fits arc:/home/[username]/file.fits
 ```
 
 Data operands use explicit `Storage-Name:/absolute/path` or

@@ -12,55 +12,56 @@ pip install canfar
 canfar login cadc
 ```
 
-CANFAR installs the audited upstream releases as normal dependencies through
-tagged Git references:
-
-- `vosfs @ git+https://github.com/shinybrar/vosfs@v0.6.0`
-- `fsspec-cli @ git+https://github.com/shinybrar/vosfs@fsspec-cli-v0.5.0#subdirectory=src/fsspec-cli`
-
-There is no separate data extra.
-
 ## Address mapped sources
 
 Every remote source uses its configured Storage Name. The reserved `local`
 source addresses the machine where the command runs. Operands always use an
 explicit mapped name and absolute path:
 
-On each CLI invocation, CANFAR rebuilds the source mapping from every Storage
-Name on every configured Science Platform Server and always adds `local`.
-Active Server Selection does not filter data sources. Each mapped source is a
-factory that creates a fresh asynchronous filesystem when the command acquires
-it.
-
 ```text
 Storage-Name:/absolute/path
 local:/absolute/path
 ```
 
-For a default CADC login, the discovered primary Storage Name is `canfar`:
+Every mapped source is available concurrently, regardless of the active Server
+Selection. A default CADC login maps two VOSpace Services, `arc` and `vault`,
+plus `local`:
 
 ```bash
-canfar data ls -lh canfar:/
-canfar data ls -lh canfar:/folder
+canfar data ls -lh arc:/
+canfar data ls -lh arc:/home/[username]
+canfar data ls -lh vault:/
 ```
 
-Use `ls -lh` (or `ll -h`) for a human-readable long listing. Standalone
-`ls -h` is not supported. Empty `:/path`, bare local paths, `active:/path`, and
-the retired `canfar storage` command are not aliases.
+Use `ls -lh`, or the `ll -h` long-form command, for a human-readable listing.
+The `-h` flag reports human-readable sizes and requires a long listing, so
+`ls -h` on its own exits with `ls: -h: requires long listing`.
+
+Operands must name a mapped source. Empty `:/path`, bare local paths such as
+`/tmp/file`, and `active:/path` are all rejected; there is no `active` alias
+and no `canfar storage` command.
 
 ## Copy files and directories
 
 Copy one file between local and remote sources:
 
 ```bash
-canfar data cp local:/absolute/path/file.fits canfar:/folder/file.fits
-canfar data cp canfar:/folder/file.fits local:/absolute/path/file.fits
+canfar data cp local:/absolute/path/file.fits arc:/home/[username]/file.fits
+canfar data cp arc:/home/[username]/file.fits local:/absolute/path/file.fits
+```
+
+Copy between two VOSpace Services, for example a public test cutout from
+`vault` into your `arc` home directory:
+
+```bash
+canfar data cp vault:/ALMA/test-data/cutouts/test-4d-cube-cutout.fits arc:/home/[username]/test-4d-cube-cutout.fits
+canfar data ls -lh arc:/home/[username]/test-4d-cube-cutout.fits
 ```
 
 Recursive copy is enabled for admitted local and remote source pairs:
 
 ```bash
-canfar data cp -R local:/absolute/path/dataset canfar:/folder/dataset
+canfar data cp -R local:/absolute/path/dataset arc:/home/[username]/dataset
 ```
 
 The tagged upstream implementation builds a bounded manifest, copies files
@@ -70,24 +71,28 @@ the destination before removing any source data.
 
 ## Move data between sources
 
-Cross-source `mv` is unsupported. Move a file explicitly by copying it,
-verifying the destination, and only then issuing a separate source removal. In
-this example, `archive` stands for a second Storage Name that you configured:
-
-```bash
-canfar data cp canfar:/folder/file.fits archive:/folder/file.fits
-canfar data ls -lh archive:/folder/file.fits
-canfar data rm canfar:/folder/file.fits
-```
-
-Do not use this sequence as a one-command or atomic move. CANFAR does not
-advertise same-source `mv` for current VOSpace sources either.
-
-Recursive removal is disabled by application policy. `rm -R` exits with status
-2 and reports:
+Cross-source `mv` is unsupported and exits with status 2:
 
 ```text
-rm: recursive removal disabled by application
+mv: cross-source move unsupported
+```
+
+Move a file between sources explicitly by copying it, verifying the
+destination, and only then issuing a separate source removal:
+
+```bash
+canfar data cp vault:/folder/file.fits arc:/home/[username]/file.fits
+canfar data ls -lh arc:/home/[username]/file.fits
+canfar data rm vault:/folder/file.fits
+```
+
+Do not use this sequence as a one-command or atomic move.
+
+Recursive removal is disabled by application policy, so `rm` accepts no `-R` or
+`-r` flag at all and exits with status 2:
+
+```text
+No such option: -R
 ```
 
 Because recursive directory removal is disabled, directory movement is not a
@@ -104,17 +109,13 @@ stderr.
 This release intentionally provides no public CANFAR storage Python API, FUSE
 mount, signed-URL extension, progress display, confirmation prompt, `:/path` or
 bare-path shorthand, `active` alias, `canfar storage` alias, recursive removal,
-or cross-source/current-VOSpace `mv` workflow.
+or cross-source `mv` workflow.
 
-## Audited upstream releases
+## Upstream releases
 
-CANFAR's integration is based on
-[`shinybrar/vosfs` PR #294](https://github.com/shinybrar/vosfs/pull/294),
-audited at commit
-[`9e5314db4706894d31d54d245392f43b9556cfbb`](https://github.com/shinybrar/vosfs/commit/9e5314db4706894d31d54d245392f43b9556cfbb).
-The installed pair is the tagged
-[`vosfs` v0.6.0](https://github.com/shinybrar/vosfs/releases/tag/v0.6.0) and
-[`fsspec-cli-v0.5.0`](https://github.com/shinybrar/vosfs/releases/tag/fsspec-cli-v0.5.0)
-releases. CANFAR tests its composition, configuration, authentication, and
-output seams; exhaustive filesystem-command and backend matrices remain in the
-upstream project.
+CANFAR installs pinned, tagged releases of
+[`vosfs`](https://github.com/shinybrar/vosfs/releases/tag/v0.7.0) and
+[`fsspec-cli`](https://github.com/shinybrar/vosfs/releases/tag/fsspec-cli-v0.6.0).
+CANFAR tests its composition, configuration, authentication, and output seams;
+exhaustive filesystem-command and backend matrices remain in the upstream
+project.

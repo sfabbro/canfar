@@ -30,22 +30,21 @@ canfar server ls
 ## 3. Work with data
 
 The standard installation includes data commands. Use a configured Storage Name
-or the reserved `local` name with an absolute path:
+or the reserved `local` name with an absolute path. A default CADC login maps
+`arc` and `vault`:
 
 ```bash
-canfar data ls -lh canfar:/
-canfar data cp local:/absolute/path/file.fits canfar:/folder/file.fits
+canfar data ls -lh arc:/home/[username]
+canfar data cp local:/absolute/path/file.fits arc:/home/[username]/file.fits
 ```
 
 Cross-source `mv` is unsupported. Copy the file, verify the destination, and
-then remove the source with a separate command. In this example, `archive` is
-a placeholder for a second Storage Name that you configured; replace it with
-that Storage Name:
+then remove the source with a separate command:
 
 ```bash
-canfar data cp canfar:/folder/file.fits archive:/folder/file.fits
-canfar data ls -lh archive:/folder/file.fits
-canfar data rm canfar:/folder/file.fits
+canfar data cp vault:/folder/file.fits arc:/home/[username]/file.fits
+canfar data ls -lh arc:/home/[username]/file.fits
+canfar data rm vault:/folder/file.fits
 ```
 
 ## 4. Create a notebook
