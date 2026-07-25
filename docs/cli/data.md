@@ -142,13 +142,21 @@ last as writable, so a shared read-only cache can back your own.
 
 ### Do not cache byte ranges
 
-Cache whole files, never blocks. OpenCADC Cavern does not implement HTTP byte
-ranges, so every partial read downloads the whole object and slices it in
-memory. A block cache therefore turns one download into one download *per
-block*: reading three headers out of a cube fetches that cube three times.
+Cache whole files, never blocks. `vosfs` sends no HTTP `Range` header, so a
+partial read such as `cat_file(path, start, end)` downloads the whole object
+and slices it in memory. A block cache therefore turns one download into one
+download *per block*: reading three headers out of a cube fetches that cube
+three times.
 
-Avoid `MMapCache` and any block-cache layer over a VOSpace Service for this
-reason. `blockcache` refuses outright, which is the safer failure:
+This is a client limitation, and it is not uniform across services. The `vault`
+backend does serve ranges — a direct request returns `206` with
+`Accept-Ranges: bytes` — while `arc` returns the whole body and advertises no
+range support. So genuine byte-range reads are possible against `vault` today
+only by bypassing `vosfs`, and teaching `vosfs` to send `Range` would unlock
+them properly for `vault` but not for `arc`.
+
+Avoid `MMapCache` and any block-cache layer over a VOSpace Service until then.
+`blockcache` refuses outright, which is the safer failure:
 
 ```text
 AttributeError: 'StagedReadFile' object has no attribute 'blocksize'

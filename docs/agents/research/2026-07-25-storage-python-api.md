@@ -86,7 +86,23 @@ therefore free to be renamed.
 
 ## 2. The constraint that dominates everything: no byte ranges
 
-DOCUMENTED. `vosfs/staging.py:3-5` states it outright:
+> **Correction (2026-07-25, after review).** The heading below overstates the
+> finding: the limitation is in the **client**, not uniformly in the services.
+> `vosfs` sends no `Range` header, so every partial read is a whole-object
+> download — that part stands and is what makes block caching a pessimization
+> today. But the services differ, VERIFIED live against both:
+>
+> | Service | Backend | Ranged `GET` |
+> | --- | --- | --- |
+> | `vault` | `minoc` (`ws-cadc.canfar.net/minoc/files/...`) | `206`, `Accept-Ranges: bytes`, `Content-Range: bytes 0-2879/3542400` |
+> | `arc` | Cavern | `200`, whole body, no `Accept-Ranges` |
+>
+> So the Cavern quote below is accurate for `arc` and does not generalize to
+> `vault`. Teaching `vosfs` to send `Range` would deliver real byte-range reads
+> on `vault` (not on `arc`), which upgrades the upstream ask in section 7 from
+> "cosmetic" to genuinely valuable.
+
+DOCUMENTED. `vosfs/staging.py:3-5` states it outright, for Cavern:
 
 > OpenCADC Cavern does not implement HTTP byte ranges, so a seekable read is a
 > whole-object download into a disk-backed temporary file.
