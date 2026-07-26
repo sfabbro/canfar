@@ -1,4 +1,4 @@
-"""Private registry evidence and discovery-worker preparation."""
+"""Registry evidence acquisition and discovery-worker preparation."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ class RegistryEvidence(BaseModel):
     available: bool
 
 
-class Enrichment(BaseModel):
+class Workers(BaseModel):
     """Isolated worker configs with one pre-materialized runtime credential.
 
     Attributes:
@@ -57,7 +57,7 @@ class Enrichment(BaseModel):
     certificate: Path | None = None
 
 
-async def discover(
+async def evidence(
     idp: str,
     *,
     dev: bool,
@@ -191,14 +191,14 @@ async def discover_storage(
         message = "Server URI is required to inspect its VOSpace Service."
         raise RegistryEvidenceError(message)
 
-    evidence = await discover(
+    found = await evidence(
         idp,
         dev=dev,
         timeout=timeout,
         check_platforms=False,
     )
-    if not evidence.available:
-        errors = "; ".join(evidence.errors)
+    if not found.available:
+        errors = "; ".join(found.errors)
         message = (
             f"Failed to inspect VOSpace registry records for IDP '{idp}': {errors}"
         )
@@ -206,7 +206,7 @@ async def discover_storage(
 
     endpoints = [
         resource
-        for resource in evidence.resources
+        for resource in found.resources
         if resource.uri == uri and resource.uri.endswith("/skaha")
     ]
     matching_urls = [
@@ -231,19 +231,19 @@ async def discover_storage(
 
     storage_resources = [
         resource
-        for resource in evidence.resources
-        if resource.uri.endswith(f"/{evidence.leaf}")
+        for resource in found.resources
+        if resource.uri.endswith(f"/{found.leaf}")
     ]
     return select_storage(endpoint, storage_resources, strict=True)
 
 
-async def enrich(
+async def workers(
     config: Configuration | None,
     idp: str,
     *,
     endpoint: RegistryResource,
     count: int,
-) -> Enrichment | None:
+) -> Workers | None:
     """Materialize credentials once, then isolate worker configuration state.
 
     Args:
@@ -253,13 +253,13 @@ async def enrich(
         count: Number of isolated worker configurations to produce.
 
     Returns:
-        Enrichment | None: Workers, or None when credentials are absent
+        Workers | None: Workers, or None when credentials are absent
         or unusable.
     """
     from canfar.client import HTTPClient  # noqa: PLC0415
 
     base_config = config or Configuration()  # ty: ignore[missing-argument]
-    client = HTTPClient(
+    client = HTTPClient.build(
         config=base_config,
         authentication_idp=idp,
         url=AnyHttpUrl(endpoint.url),
@@ -268,7 +268,7 @@ async def enrich(
     certificate: Path | None = None
     if client.uses_runtime_credentials or client.authentication_record is not None:
         try:
-            token, certfile = await client._materialize_credentials()  # noqa: SLF001
+            credential = await client._materialize_credentials()  # noqa: SLF001
         except (
             KeyError,
             OSError,
@@ -280,8 +280,11 @@ async def enrich(
         ) as exc:
             log.debug("Skipping capability enrichment for IDP %s: %s", idp, exc)
             return None
-        certificate = Path(certfile) if certfile is not None else None
+        token = credential.token
+        certificate = (
+            Path(credential.certificate) if credential.certificate is not None else None
+        )
 
     values = base_config.model_dump(mode="python")
     configs = tuple(Configuration.model_validate(values) for _ in range(count))
-    return Enrichment(configs=configs, token=token, certificate=certificate)
+    return Workers(configs=configs, token=token, certificate=certificate)

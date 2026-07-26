@@ -14,7 +14,7 @@ from pydantic import AnyHttpUrl, AnyUrl
 
 from canfar.errors import ErrorCode
 from canfar.models.active import ActiveConfig
-from canfar.models.auth import OIDCCredential, X509Credential
+from canfar.models.auth import OIDCCredential, RuntimeCredential, X509Credential
 from canfar.models.config import Configuration, default_servers
 from canfar.models.http import Server, VOSpaceService
 from canfar.models.registry import IVOARegistry, IVOARegistrySearch
@@ -566,7 +566,7 @@ class TestServerDiscovery:
         config = _anonymous_config()
 
         with (
-            patch("canfar._discovery.Discover", return_value=mock_discovery),
+            patch("canfar.utils.registry.Discover", return_value=mock_discovery),
             patch(
                 "canfar.client.Client",
                 side_effect=_http_client_factory(transport),
@@ -641,7 +641,7 @@ class TestServerDiscovery:
             )
 
         with (
-            patch("canfar._discovery.Discover", return_value=mock_discovery),
+            patch("canfar.utils.registry.Discover", return_value=mock_discovery),
             patch("canfar.server.enrich", side_effect=enriched),
         ):
             servers = await _discover_for_idp("srcnet")
@@ -766,9 +766,9 @@ class TestServerDiscovery:
                 auths=["oidc"],
             )
 
-        materialize = AsyncMock(return_value=("current-token", None))
+        materialize = AsyncMock(return_value=RuntimeCredential(token="current-token"))
         with (
-            patch("canfar._discovery.Discover", return_value=mock_discovery),
+            patch("canfar.utils.registry.Discover", return_value=mock_discovery),
             patch("canfar.server._discovered_to_server", side_effect=convert),
             patch(
                 "canfar.client.HTTPClient._materialize_credentials",
@@ -819,9 +819,9 @@ class TestServerDiscovery:
             requests.append(request)
             return httpx.Response(200, text=session_capabilities, request=request)
 
-        materialize = AsyncMock(return_value=("runtime-token", None))
+        materialize = AsyncMock(return_value=RuntimeCredential(token="runtime-token"))
         with (
-            patch("canfar._discovery.Discover", return_value=mock_discovery),
+            patch("canfar.utils.registry.Discover", return_value=mock_discovery),
             patch(
                 "canfar.client.HTTPClient._materialize_credentials",
                 new=materialize,
@@ -879,7 +879,7 @@ class TestServerDiscovery:
         monkeypatch.delenv("CANFAR_CERTIFICATE", raising=False)
         monkeypatch.setenv("CANFAR_TOKEN", "environment-token")
         with (
-            patch("canfar._discovery.Discover", return_value=mock_discovery),
+            patch("canfar.utils.registry.Discover", return_value=mock_discovery),
             patch(
                 "canfar.client.Client",
                 side_effect=_http_client_factory(httpx.MockTransport(response)),
@@ -933,7 +933,7 @@ class TestServerDiscovery:
         monkeypatch.delenv("CANFAR_TOKEN", raising=False)
         monkeypatch.setenv("CANFAR_CERTIFICATE", certificate.as_posix())
         with (
-            patch("canfar._discovery.Discover", return_value=mock_discovery),
+            patch("canfar.utils.registry.Discover", return_value=mock_discovery),
             patch(
                 "canfar.client.x509.inspect",
                 return_value={
@@ -1214,7 +1214,7 @@ class TestServerDiscovery:
 
         with (
             patch("canfar.models.config.CONFIG_PATH", config_path),
-            patch("canfar._discovery.Discover", return_value=mock_discovery),
+            patch("canfar.utils.registry.Discover", return_value=mock_discovery),
             patch(
                 "canfar.server.enrich",
                 side_effect=lambda item, **_kwargs: item.model_copy(
@@ -1252,7 +1252,7 @@ class TestServerDiscovery:
         mock_discovery.__aexit__ = AsyncMock(return_value=None)
 
         with (
-            patch("canfar._discovery.Discover", return_value=mock_discovery),
+            patch("canfar.utils.registry.Discover", return_value=mock_discovery),
             patch(
                 "canfar.server.enrich",
                 side_effect=lambda item, **_kwargs: item.model_copy(
@@ -1341,7 +1341,7 @@ class TestServerDiscovery:
         mock_discovery.__aexit__ = AsyncMock(return_value=None)
 
         with (
-            patch("canfar._discovery.Discover", return_value=mock_discovery),
+            patch("canfar.utils.registry.Discover", return_value=mock_discovery),
             pytest.raises(ServerDiscoveryError, match="Failed to discover"),
         ):
             await _discover_for_idp("cadc")
@@ -1359,7 +1359,7 @@ class TestServerDiscovery:
         mock_discovery.__aexit__ = AsyncMock(return_value=None)
 
         with patch(
-            "canfar._discovery.Discover", return_value=mock_discovery
+            "canfar.utils.registry.Discover", return_value=mock_discovery
         ) as factory:
             servers = await _discover_for_idp("cadc", dev=True, timeout=11)
 

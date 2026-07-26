@@ -8,7 +8,7 @@ without an adapter.
 
 The same Storage Identifiers the CLI uses are importable by name.
 
-## Open a Storage Service
+## Open a VOSpace Service
 
 Import a Storage Identifier and you get a ready, authenticated filesystem. Run
 `canfar login` first; the credential resolution is the same one the CLI uses.
@@ -81,18 +81,11 @@ Some libraries want a real path rather than a file object — anything that
 memory-maps, or a C extension that opens by name. Materialise the file:
 
 ```python
-from canfar.storage import fetch
-
-path = fetch("vault", target, "/scratch/cutout.fits")
-```
-
-`fetch` returns the local `Path`. Omit the destination to write into the
-current directory under the object's own name. The underlying filesystem
-method works too:
-
-```python
 vault.get_file(target, "/scratch/cutout.fits")
 ```
+
+`get_file` is the standard fsspec verb; `put_file` is its counterpart for
+uploads.
 
 ## Cache
 

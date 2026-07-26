@@ -26,6 +26,7 @@ from canfar.hooks.httpx import auth, debug, errors, expiry
 from canfar.models.auth import (
     AuthenticationCredential,
     OIDCCredential,
+    RuntimeCredential,
     X509Credential,
 )
 from canfar.models.config import Configuration
@@ -231,21 +232,63 @@ class HTTPClient(BaseSettings):
             )
         return credential
 
-    async def _materialize_credentials(self) -> tuple[str | None, str | None]:
-        """Return one literal token or validated certificate path."""
+    @classmethod
+    def build(
+        cls,
+        *,
+        config: Configuration,
+        authentication_idp: str,
+        url: Any,
+        token: Any = None,
+        certificate: Any = None,
+        **extra: Any,
+    ) -> HTTPClient:
+        """Build a client, omitting runtime credentials that were not supplied.
+
+        Unset credentials are omitted rather than passed as ``None`` so the
+        settings sources stay free to supply them.
+
+        Args:
+            config: Configuration backing the client.
+            authentication_idp: Canonical Identity Provider key.
+            url: Base URL for the client.
+            token: Runtime bearer token, when overriding the saved record.
+            certificate: Runtime X.509 certificate path, when overriding it.
+            **extra: Further client settings passed through unchanged.
+
+        Returns:
+            HTTPClient: A client bound to the supplied credentials.
+        """
+        supplied = {"token": token, "certificate": certificate}
+        return cls(
+            config=config,
+            authentication_idp=authentication_idp,
+            url=url,
+            **{key: value for key, value in supplied.items() if value is not None},
+            **extra,
+        )
+
+    async def _materialize_credentials(self) -> RuntimeCredential:
+        """Return one literal token or validated certificate path.
+
+        Returns:
+            RuntimeCredential: Exactly one of a bearer token or a certificate.
+        """
         if self.token is not None:
             token = self.token.get_secret_value()
             if token:
-                return token, None
+                return RuntimeCredential(token=token)
             raise ValueError
         if self.certificate is not None:
-            return None, x509.valid(self.certificate)
+            return RuntimeCredential(certificate=x509.valid(self.certificate))
 
         credential = self.authentication_record
         if isinstance(credential, X509Credential):
             if credential.path is None:
                 raise ValueError
-            return None, str(x509.inspect(credential.path)["path"])
+            return RuntimeCredential(
+                certificate=str(x509.inspect(credential.path)["path"])
+            )
         if not isinstance(credential, OIDCCredential):
             raise TypeError
 
@@ -264,7 +307,7 @@ class HTTPClient(BaseSettings):
         token = credential.token.access.get_secret_value()
         if not token:
             raise ValueError
-        return token, None
+        return RuntimeCredential(token=token)
 
     def _get_base_url(self) -> URL:
         """Get the base URL for the client.

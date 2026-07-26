@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 from xml.etree.ElementTree import ParseError
 
 import httpx
 from defusedxml.common import DefusedXmlException
 from pydantic import AnyHttpUrl, AnyUrl, BaseModel, ConfigDict, ValidationError
 
-from canfar import _discovery, get_logger
-from canfar._discovery import RegistryEvidenceError
+from canfar import get_logger
 from canfar.auth.x509 import CertificateError
 from canfar.errors import ErrorCode, StructuredError
 from canfar.exceptions.context import AuthContextError, AuthExpiredError
@@ -26,7 +25,8 @@ from canfar.models.http import (
     VOSpaceService,
 )
 from canfar.models.registry import Server as RegistryResource
-from canfar.utils import vosi
+from canfar.utils import registry, vosi
+from canfar.utils.registry import RegistryEvidenceError
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -438,7 +438,7 @@ async def _discover_for_idp(
     Raises:
         ServerDiscoveryError: If registry retrieval fails.
     """
-    evidence = await _discovery.discover(
+    evidence = await registry.evidence(
         idp,
         dev=dev,
         timeout=timeout,
@@ -462,7 +462,7 @@ async def _discover_for_idp(
         for resource in evidence.resources
         if resource.uri.endswith(f"/{evidence.leaf}")
     ]
-    workers = await _discovery.enrich(
+    workers = await registry.workers(
         config,
         idp,
         endpoint=endpoints[0],
@@ -513,7 +513,7 @@ def _select_storage(
 ) -> RegistryResource | None:
     """Map private registry ambiguity to the public server fetch error."""
     try:
-        return _discovery.select_storage(endpoint, resources, strict=strict)
+        return registry.select_storage(endpoint, resources, strict=strict)
     except RegistryEvidenceError as exc:
         raise ServerFetchError(str(exc)) from exc
 
@@ -527,7 +527,7 @@ async def _discover_storage(
 ) -> RegistryResource | None:
     """Return fresh registry evidence for a server's primary VOSpace service."""
     try:
-        return await _discovery.discover_storage(
+        return await registry.discover_storage(
             str(server.uri) if server.uri is not None else None,
             str(server.url) if server.url is not None else None,
             server.name,
@@ -822,18 +822,15 @@ def _fetch_capabilities(
     """Fetch one VOSI capabilities document through the existing HTTP seam."""
     from canfar.client import HTTPClient  # noqa: PLC0415
 
-    client_kwargs: dict[str, Any] = {
-        "config": config,
-        "authentication_idp": authentication_idp,
-        "url": url,
-        "timeout": timeout,
-        "raise_http_errors": False,
-    }
-    if token is not None:
-        client_kwargs["token"] = token
-    if certificate is not None:
-        client_kwargs["certificate"] = certificate
-    with HTTPClient(**client_kwargs) as client:
+    with HTTPClient.build(
+        config=config,
+        authentication_idp=authentication_idp,
+        url=url,
+        token=token,
+        certificate=certificate,
+        timeout=timeout,
+        raise_http_errors=False,
+    ) as client:
         request_client = client.client
         request_client.headers["Accept"] = "application/xml"
         request_client.headers.pop("Content-Type", None)

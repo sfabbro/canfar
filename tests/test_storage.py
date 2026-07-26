@@ -441,4 +441,4 @@ class TestPublicSurface:
 
         listed = dir(storage)
 
-        assert {"archive", "local", "filesystem", "fetch", "identifiers"} <= set(listed)
+        assert {"archive", "local", "filesystem", "identifiers"} <= set(listed)

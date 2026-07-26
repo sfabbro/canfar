@@ -279,6 +279,7 @@ nav:
               - Domain Docs: agents/domain.md
               - Issue Tracker: agents/issue-tracker.md
               - Triage Statuses: agents/triage-labels.md
+              - Upstream Provenance: agents/upstream-provenance.md
       - Operations:
           - Platform Deployments: https://www.opencadc.org/deployments/
       - Security Issues: security.md

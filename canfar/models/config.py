@@ -36,7 +36,7 @@ from canfar.models.auth import (
     AuthenticationCredential,
     X509Credential,
 )
-from canfar.models.http import Server, VOSpaceService
+from canfar.models.http import LOCAL, Server, VOSpaceService
 from canfar.models.registry import ContainerRegistry
 
 log = get_logger(__name__)
@@ -195,6 +195,9 @@ class Configuration(BaseSettings):
         an existing configuration holds ``canfar`` instead of ``arc`` and never
         gained later defaults such as ``vault``. Healing is scoped to the
         default Servers so federated Servers keep their Server Name keys.
+
+        This normalizes the loaded Configuration in memory only; the file on
+        disk is rewritten when something independently calls ``save()``.
         """
         for name, default in default_servers.items():
             server = self.servers.get(name)
@@ -208,8 +211,8 @@ class Configuration(BaseSettings):
             if legacy is not None:
                 leaf = str(legacy.uri).rpartition("/")[2] or name
                 storage.setdefault(leaf, legacy)
-            for storage_name, service in default.storage.items():
-                storage.setdefault(storage_name, service.model_copy(deep=True))
+            for identifier, service in default.storage.items():
+                storage.setdefault(identifier, service.model_copy(deep=True))
             if storage != server.storage:
                 self.servers[name] = server.model_copy(
                     update={"storage": storage},
@@ -221,7 +224,7 @@ class Configuration(BaseSettings):
         """Inject Server Names and validate Server and Storage Identifier keys."""
         self._heal_default_storage()
         updated: dict[str, Server] = {}
-        server_name_by_storage_name: dict[str, str] = {}
+        server_by_identifier: dict[str, str] = {}
         for name, server in self.servers.items():
             if not _SERVER_NAME_PATTERN.match(name):
                 msg = (
@@ -229,17 +232,15 @@ class Configuration(BaseSettings):
                     r"^[A-Za-z][A-Za-z0-9_-]*$"
                 )
                 raise ValueError(msg)
-            for storage_name in server.storage:
-                if previous_server_name := server_name_by_storage_name.get(
-                    storage_name
-                ):
+            for identifier in server.storage:
+                if previous_server_name := server_by_identifier.get(identifier):
                     msg = (
-                        f"Duplicate Storage Identifier '{storage_name}' in "
+                        f"Duplicate Storage Identifier '{identifier}' in "
                         "Science Platform "
                         f"Servers '{previous_server_name}' and '{name}'."
                     )
                     raise ValueError(msg)
-                server_name_by_storage_name[storage_name] = name
+                server_by_identifier[identifier] = name
             updated[name] = server.model_copy(update={"name": name}, deep=True)
         self.servers = updated
         return self
@@ -380,20 +381,33 @@ class Configuration(BaseSettings):
             raise KeyError(msg)
         return self.servers[name]
 
-    def _resolve_storage(self, storage_name: str) -> tuple[str, str]:
+    def storage_identifiers(self) -> list[str]:
+        """Return every addressable Storage Identifier, ``local`` last.
+
+        Returns:
+            list[str]: Configured Storage Identifiers plus reserved ``local``.
+        """
+        configured = {
+            identifier
+            for server in self.servers.values()
+            for identifier in server.storage
+        }
+        return [*sorted(configured), LOCAL]
+
+    def _resolve_storage(self, identifier: str) -> tuple[str, str]:
         """Resolve a Storage Identifier to its endpoint and parent server IDP."""
         for server in self.servers.values():
-            service = server.storage.get(storage_name)
+            service = server.storage.get(identifier)
             if service is not None:
                 if server.idp is None:
                     msg = (
-                        f"Storage Identifier '{storage_name}' belongs to a "
+                        f"Storage Identifier '{identifier}' belongs to a "
                         "Science Platform "
                         "Server without an IDP."
                     )
                     raise ValueError(msg)
                 return str(service.url), server.idp
-        msg = f"Storage Identifier '{storage_name}' is not configured."
+        msg = f"Storage Identifier '{identifier}' is not configured."
         raise KeyError(msg)
 
     def upsert_credential(self, credential: AuthenticationCredential) -> None:

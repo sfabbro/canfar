@@ -16,6 +16,15 @@ DEFAULT_SERVER_GPUS = 0
 """Default GPU count when context enrichment is unavailable."""
 
 
+LOCAL = "local"
+"""Reserved Storage Identifier for the machine where the code runs."""
+
+RESERVED_IDENTIFIERS = frozenset(
+    {LOCAL, "filesystem", "identifiers", "sources"},
+)
+"""Storage Identifiers that would shadow the ``canfar.storage`` module surface."""
+
+
 class VOSpaceService(BaseModel):
     """VOSpace Service discovered through an IVOA registry."""
 
@@ -127,7 +136,7 @@ class Server(BaseModel):
 
     @field_validator("storage", mode="before")
     @classmethod
-    def _validate_storage_names(cls, value: Any) -> Any:
+    def _validate_storage_identifiers(cls, value: Any) -> Any:
         """Normalize and validate Storage Identifiers before key transforms."""
         if not isinstance(value, dict):
             return value
@@ -141,11 +150,15 @@ class Server(BaseModel):
                 name = None
             else:
                 name = original_name.strip()
-            if name is None or (not name or name == "local" or name.startswith("-")):
+            if name is None or (
+                not name or name in RESERVED_IDENTIFIERS or name.startswith("-")
+            ):
+                reserved = ", ".join(sorted(RESERVED_IDENTIFIERS))
                 msg = (
                     f"Invalid Storage Identifier {original_name!r}: after whitespace "
-                    "normalization it must be non-empty, differ from reserved 'local', "
-                    "contain no colon, NUL, or newline, and not start with '-'."
+                    f"normalization it must be non-empty, avoid the reserved names "
+                    f"({reserved}), contain no colon, NUL, or newline, and not start "
+                    "with '-'."
                 )
                 raise ValueError(msg)
             if name in normalized:
