@@ -1,6 +1,6 @@
 # Filesystem Access
 
-**CANFAR's ARC storage systems as filesystems, SSHFS mounting from external computers, and permission management.**
+**CANFAR's ARC (Cavern) storage systems as filesystems, SSHFS mounting from external computers, and permission management.**
 
 !!! abstract "🎯 Filesystem Guide Overview"
     **Master direct storage access:**
@@ -104,6 +104,110 @@ chmod 644 data_file.fits          # Read/write owner, read others
 chmod 755 analysis_script.py      # Executable script
 chgrp projectgroup shared_data/   # Change group ownership
 ```
+
+### Creating a Project Allocation
+
+A project allocation under `/arc/projects/[project]` is **not** another folder created with `mkdir`. It is a VOSpace container node that carries a **quota** (in bytes) and an associated **team Group** for membership and access. Ordinary directory operations only work *inside* an allocation that already exists.
+
+Creating an allocation must be invoked **as the Allocations owner** (the admin identity used for allocation nodes; currently `storops`). End users cannot create project allocations this way — request one via [support@canfar.net](mailto:support@canfar.net) (see the [FAQ](../support/faq.md#how-much-storage-do-i-get-and-where-should-i-put-data)). Group membership for access is managed separately through [Group Management](https://www.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/en/groups/).
+
+The steps below adapt the low-level node create process for ARC project allocations. The same VOSpace node model applies to related services (for example vault); for ARC, use the arc nodes endpoint and authority.
+
+#### Create the allocation
+
+1. Create an XML file from this minimal template:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<vos:node xmlns:vos="http://www.ivoa.net/xml/VOSpace/v2.0"
+ xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+ uri="vos://AUTHORITY/projects/NAME" xsi:type="vos:ContainerNode">
+ <vos:properties>
+ <vos:property uri="ivo://ivoa.net/vospace/core#creator">USERNAME</vos:property>
+ <vos:property uri="ivo://cadc.nrc.ca/vospace/core#inheritPermissions">true</vos:property>
+ <vos:property uri="ivo://ivoa.net/vospace/core#quota">NUMBYTES</vos:property>
+ </vos:properties>
+ <vos:nodes />
+</vos:node>
+```
+
+`AUTHORITY` is the VOSpace authority for that site’s ARC (Cavern) service (it differs by deployment). For example, on CANFAR ARC it is typically `cadc.nrc.ca~arc`, so a project named `myproject` would use:
+
+```text
+vos://cadc.nrc.ca~arc/projects/myproject
+```
+
+For SRCNet deployments, it would look like that site's identification.  For `canSRC`, for example:
+
+```text
+vos://canfar.net~staging-src~cavern
+```
+
+Always confirm the value from the site’s root node (step 5 below) rather than hard-coding an authority from another environment.
+
+2. Edit the file:
+
+    1. Put the project name in the `uri` path (replace `NAME`). The path must match the mounted tree: `/arc/projects/[project]` ↔ `projects/NAME`.
+    2. Put the owner’s username in the `#creator` property (replace `USERNAME`).
+    3. Put the desired quota in bytes in the `#quota` property (replace `NUMBYTES`).
+    4. Leave `#inheritPermissions` as `true` (sane default).
+    5. Set the authority part of the `uri` from the ARC root node for that site:
+
+```bash
+curl https://example.org/arc/nodes?limit=0
+```
+
+3. Create the container node authenticated as the Allocations owner. Certificate and Bearer token authentication are both accepted:
+
+```bash
+curl --cert certificate.pem --header "content-type: text/xml" \
+  --upload-file <xml file> \
+  https://example.org/arc/nodes/projects/NAME
+
+curl --header "Authorization: Bearer TOKEN" \
+  --header "content-type: text/xml" \
+  --upload-file <xml file> \
+  https://example.org/arc/nodes/projects/NAME
+```
+
+`NAME` in the URL must match the name in the XML `uri`, or the create request is rejected. On success, the service returns an XML representation of the created node (it may include additional default properties).
+
+#### Check allocation status
+
+```bash
+curl https://example.org/arc/nodes/projects/NAME?limit=0
+```
+
+`limit=0` means “do not list children.” Auth is optional for a publicly readable parent, but you can use Allocations-owner credentials (certificate or Bearer token) as above.
+
+#### Delete an empty allocation
+
+If you make a mistake and the node has no children:
+
+```bash
+curl --cert certificate.pem -X DELETE \
+  https://example.org/arc/nodes/projects/NAME
+
+curl --header "Authorization: Bearer TOKEN" -X DELETE \
+  https://example.org/arc/nodes/projects/NAME
+```
+
+This fails if the container has any child nodes.
+
+#### Update quota on an existing allocation
+
+```bash
+curl --cert certificate.pem --header "content-type: text/xml" \
+  --data-binary @<xml file> \
+  https://example.org/arc/nodes/projects/NAME
+
+curl --header "Authorization: Bearer TOKEN" \
+  --header "content-type: text/xml" \
+  --data-binary @<xml file> \
+  https://example.org/arc/nodes/projects/NAME
+```
+
+The XML only needs the properties you intend to change (typically `#quota`). Include only that property so other node properties are not changed by accident. Changing the owner of a node via this path is not implemented.
 
 ### Working with Large Datasets
 
