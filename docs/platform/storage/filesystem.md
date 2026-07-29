@@ -18,6 +18,14 @@ ARC storage (Home and Projects) can be accessed as standard Unix filesystems bot
 
 When you start any CANFAR session (Notebook, Desktop, or batch job), ARC storage is automatically mounted as standard directories:
 
+!!! abstract "🎯 Storage Naming"
+    **ARC or Cavern:**
+    
+    Both use the same VOSpace image.
+
+    - **ARC**: The CANFAR user storage system
+    - **Cavern**: The generic deployment for user storage
+
 ```bash
 # Automatic mounts in every session
 /arc/home/[user]/          # Your personal 10GB space
@@ -109,7 +117,8 @@ chgrp projectgroup shared_data/   # Change group ownership
 
 A project allocation under `/arc/projects/[project]` is **not** another folder created with `mkdir`. It is a VOSpace container node that carries a **quota** (in bytes) and an associated **team Group** for membership and access. Ordinary directory operations only work *inside* an allocation that already exists.
 
-Creating an allocation must be invoked **as the Allocations owner** (the admin identity used for allocation nodes; currently `storops`). End users cannot create project allocations this way — request one via [support@canfar.net](mailto:support@canfar.net) (see the [FAQ](../support/faq.md#how-much-storage-do-i-get-and-where-should-i-put-data)). Group membership for access is managed separately through [Group Management](https://www.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/en/groups/).
+!!! danger "🔐 Admin only — Allocations owner required"
+    Creating an allocation must be invoked **as the Allocations owner** (the admin identity used for allocation nodes; currently `storops`). **This procedure is not for general users.** End users cannot create project allocations this way — request one via [support@canfar.net](mailto:support@canfar.net) (see the [FAQ](../support/faq.md#how-much-storage-do-i-get-and-where-should-i-put-data)). Group membership for access is managed separately through [Group Management](https://www.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/en/groups/).
 
 The steps below adapt the low-level node create process for ARC project allocations. The same VOSpace node model applies to related services (for example vault); for ARC, use the arc nodes endpoint and authority.
 
