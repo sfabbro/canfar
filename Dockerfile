@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # renovate: datasource=docker depName=ghcr.io/astral-sh/uv versioning=semver
-FROM ghcr.io/astral-sh/uv:alpine@sha256:43b3b2268a2ce75b0a82554224dd36351034fc66f52064eea49e6c22605d4c39 AS uv
+FROM ghcr.io/astral-sh/uv:alpine@sha256:d7c59d83cc8828a66901b648a34c03abd7cac8774e50761301702a6f334e1f0f AS uv
 
 # renovate: datasource=docker depName=python versioning=python
 FROM python:alpine@sha256:26730869004e2b9c4b9ad09cab8625e81d256d1ce97e72df5520e806b1709f92 AS builder
