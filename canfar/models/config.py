@@ -36,7 +36,7 @@ from canfar.models.auth import (
     AuthenticationCredential,
     X509Credential,
 )
-from canfar.models.http import Server
+from canfar.models.http import LOCAL, Server, VOSpaceService
 from canfar.models.registry import ContainerRegistry
 
 log = get_logger(__name__)
@@ -65,6 +65,16 @@ default_servers: dict[str, Server] = {
         url=AnyHttpUrl("https://ws-uv.canfar.net/skaha"),
         version="v1",
         auths=["x509"],
+        storage={
+            "arc": VOSpaceService(
+                uri=AnyUrl("ivo://cadc.nrc.ca/arc"),
+                url=AnyHttpUrl("https://ws-uv.canfar.net/arc"),
+            ),
+            "vault": VOSpaceService(
+                uri=AnyUrl("ivo://cadc.nrc.ca/vault"),
+                url=AnyHttpUrl("https://cadc-west-01.canfar.net/vault"),
+            ),
+        },
     ),
 }
 
@@ -178,10 +188,43 @@ class Configuration(BaseSettings):
             file_secret_settings,
         )
 
+    def _heal_default_storage(self) -> None:
+        """Restore default Storage Identifiers on Servers saved by an older client.
+
+        Older clients keyed a discovered VOSpace Service by its Server Name, so
+        an existing configuration holds ``canfar`` instead of ``arc`` and never
+        gained later defaults such as ``vault``. Healing is scoped to the
+        default Servers so federated Servers keep their Server Name keys.
+
+        This normalizes the loaded Configuration in memory only; the file on
+        disk is rewritten when something independently calls ``save()``.
+        """
+        for name, default in default_servers.items():
+            server = self.servers.get(name)
+            if server is None or not default.storage or server.idp != default.idp:
+                continue
+            storage = dict(server.storage)
+            legacy = storage.pop(name, None)
+            if legacy is None and storage:
+                # Deliberate Storage Identifiers are configuration, not stale defaults.
+                continue
+            if legacy is not None:
+                leaf = str(legacy.uri).rpartition("/")[2] or name
+                storage.setdefault(leaf, legacy)
+            for identifier, service in default.storage.items():
+                storage.setdefault(identifier, service.model_copy(deep=True))
+            if storage != server.storage:
+                self.servers[name] = server.model_copy(
+                    update={"storage": storage},
+                    deep=True,
+                )
+
     @model_validator(mode="after")
-    def _inject_server_names(self) -> Configuration:
-        """Inject dict keys into each server record and validate Server Names."""
+    def _normalize_and_validate_servers(self) -> Configuration:
+        """Inject Server Names and validate Server and Storage Identifier keys."""
+        self._heal_default_storage()
         updated: dict[str, Server] = {}
+        server_by_identifier: dict[str, str] = {}
         for name, server in self.servers.items():
             if not _SERVER_NAME_PATTERN.match(name):
                 msg = (
@@ -189,6 +232,15 @@ class Configuration(BaseSettings):
                     r"^[A-Za-z][A-Za-z0-9_-]*$"
                 )
                 raise ValueError(msg)
+            for identifier in server.storage:
+                if previous_server_name := server_by_identifier.get(identifier):
+                    msg = (
+                        f"Duplicate Storage Identifier '{identifier}' in "
+                        "Science Platform "
+                        f"Servers '{previous_server_name}' and '{name}'."
+                    )
+                    raise ValueError(msg)
+                server_by_identifier[identifier] = name
             updated[name] = server.model_copy(update={"name": name}, deep=True)
         self.servers = updated
         return self
@@ -328,6 +380,35 @@ class Configuration(BaseSettings):
             msg = f"Server '{name}' not found."
             raise KeyError(msg)
         return self.servers[name]
+
+    def storage_identifiers(self) -> list[str]:
+        """Return every addressable Storage Identifier, ``local`` last.
+
+        Returns:
+            list[str]: Configured Storage Identifiers plus reserved ``local``.
+        """
+        configured = {
+            identifier
+            for server in self.servers.values()
+            for identifier in server.storage
+        }
+        return [*sorted(configured), LOCAL]
+
+    def _resolve_storage(self, identifier: str) -> tuple[str, str]:
+        """Resolve a Storage Identifier to its endpoint and parent server IDP."""
+        for server in self.servers.values():
+            service = server.storage.get(identifier)
+            if service is not None:
+                if server.idp is None:
+                    msg = (
+                        f"Storage Identifier '{identifier}' belongs to a "
+                        "Science Platform "
+                        "Server without an IDP."
+                    )
+                    raise ValueError(msg)
+                return str(service.url), server.idp
+        msg = f"Storage Identifier '{identifier}' is not configured."
+        raise KeyError(msg)
 
     def upsert_credential(self, credential: AuthenticationCredential) -> None:
         """Insert or replace a validated Authentication Record.

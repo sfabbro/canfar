@@ -166,6 +166,23 @@ class DeviceAuthorization(BaseModel):
     ]
 
 
+class RuntimeCredential(BaseModel):
+    """One materialized credential, ready to authenticate a request.
+
+    Exactly one field is set: an Authentication Record resolves to either a
+    bearer token or a validated X.509 certificate path, never both.
+
+    Attributes:
+        token: Bearer token value, when the record provides one.
+        certificate: Validated X.509 certificate path, when the record is X.509.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    token: str | None = None
+    certificate: str | None = None
+
+
 class X509Credential(BaseModel):
     """X.509 authentication credential decoupled from server selection."""
 
