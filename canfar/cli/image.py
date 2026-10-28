@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Annotated, get_args
 
-import click
 import typer
 from rich import box
 from rich.table import Table
@@ -12,7 +11,7 @@ from rich.text import Text
 
 from canfar.images import Images
 from canfar.models.types import Kind
-from canfar.utils.console import console
+from canfar.utils.console import emit_cli_active_server_banner, get_console
 
 if TYPE_CHECKING:
     from canfar.models.containers import Image
@@ -73,17 +72,17 @@ def ls(
         typer.Option(
             "--kind",
             "-k",
-            click_type=click.Choice(list(get_args(Kind)), case_sensitive=True),
             metavar="|".join(get_args(Kind)),
             help="Filter by image kind.",
         ),
     ] = None,
 ) -> None:
     """List available images."""
+    emit_cli_active_server_banner()
     payload: list[Image] = Images().details()
     images = [image for image in payload if not kind or kind in image.types]
     if not images:
-        console.print("[yellow]No images found.[/yellow]")
+        get_console(stderr=True).print("[yellow]No images found.[/yellow]")
         return
 
     server, _ = _split_server(images[0].id)
@@ -102,4 +101,4 @@ def ls(
         kinds = _format_kinds(image.types)
         table.add_row(image_id, short_digest, kinds)
 
-    console.print(table)
+    get_console().print(table)

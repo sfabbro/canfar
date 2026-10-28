@@ -2,20 +2,20 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from defusedxml import ElementTree
-from httpx import URL
+from httpx2 import URL
 from pydantic import model_validator
 from typing_extensions import Self
 
-from canfar import get_logger
 from canfar.client import HTTPClient
 
 if TYPE_CHECKING:
-    from httpx import Response
+    from httpx2 import Response
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
 
 
 class Overview(HTTPClient):
@@ -69,5 +69,5 @@ class Overview(HTTPClient):
         if availaibility is None:
             log.error("No availability information found in the response.")
             return False
-        log.info(notify if notify else "No additional information provided.")
+        log.info(notify or "No additional information provided.")
         return availaibility == "true"

@@ -3,37 +3,22 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Annotated
 
-import typer
 from rich import box
 from rich.table import Table
 
+from canfar.models.config import Configuration
 from canfar.sessions import AsyncSession
-from canfar.utils.console import console
-
-stats = typer.Typer(
-    name="stats",
-    help="Display cluster-wide statistics.",
-    no_args_is_help=False,
-)
+from canfar.utils.console import emit_cli_active_server_banner, get_console
 
 
-@stats.callback(invoke_without_command=True)
-def get_stats(
-    debug: Annotated[
-        bool,
-        typer.Option(
-            "--debug",
-            help="Enable debug logging.",
-        ),
-    ] = False,
-) -> None:
+def get_stats() -> None:
     """Display cluster-wide usage and status statistics."""
+    emit_cli_active_server_banner()
 
     async def _get_stats() -> None:
-        log_level = "DEBUG" if debug else "INFO"
-        async with AsyncSession(loglevel=log_level) as session:
+        """Fetch cluster-wide statistics and render them."""
+        async with AsyncSession() as session:
             data = await session.stats()
 
         # Main table
@@ -44,31 +29,8 @@ def get_stats(
             header_style="bold blue",
         )
 
-        # Disable Instances column until the underlying query can be made to work
-        # efficiently.
-        # jenkinsd 2025.11.20
-        #
         table.add_column("CPU", justify="center")
         table.add_column("RAM", justify="center")
-
-        # Nested table for Instances
-        instances = data.get("instances", {})
-        instances_table = Table(box=box.MINIMAL, show_header=False)
-        instances_table.add_column("Kind", justify="left")
-        instances_table.add_column("Count", justify="left")
-        # Change DesktopApp to Desktop in the instances table
-        if "desktopApp" in instances:
-            instances["Desktops"] = instances.pop("desktopApp")
-
-        for key, value in instances.items():
-            if key == "total":
-                pass
-            else:
-                instances_table.add_row(key.capitalize(), str(value))
-        if "total" in instances:
-            instances_table.add_row(
-                "Total", str(instances["total"]), style="bold italic"
-            )
 
         # Nested table for Cores
         cores = data.get("cores", {})
@@ -86,18 +48,32 @@ def get_stats(
         ram_table.add_row("Usage", f"{ram.get('requestedRAM', 'N/A')}")
         ram_table.add_row("Total", f"{ram.get('ramAvailable', 'N/A')}")
 
-        # Commenting out Instances column until the underlying query can be made to work
-        # efficiently.
-        # jenkinsd 2025.11.20
-        #
+        columns = [cores_table, ram_table]
+        if "gpu" in data:
+            gpu = data["gpu"]
+            table.add_column("GPU", justify="center")
+            gpu_table = Table(box=box.MINIMAL, show_header=False)
+            gpu_table.add_column("Metric", justify="left")
+            gpu_table.add_column("Value", justify="left")
+            gpu_table.add_row("Usage", str(gpu.get("requestedGPU", "N/A")))
+            gpu_table.add_row("Total", str(gpu.get("gpuAvailable", "N/A")))
+            columns.append(gpu_table)
+        table.add_row(*columns)
 
-        # Add the first row with nested tables
-        table.add_row(cores_table, ram_table)
-
-        console.print(table)
-        console.print("[bold]Maximum Requests Size:[/bold] 16 Cores & 192.0 GB RAM")
-        console.print(
-            "[dim]Based on best-case scenario, and may not be achievable.[/dim]"
-        )
+        get_console().print(table)
+        config = Configuration()  # ty: ignore[missing-argument]
+        server = config.servers.get(config.active.server or "")
+        resources = server.resources if server is not None else None
+        get_console().print("\n[bold]Maximum Resource Requests[/bold]\n")
+        for label, mode in (
+            ("Fixed", resources.fixed if resources is not None else None),
+            ("Flexible", resources.flexible if resources is not None else None),
+        ):
+            if mode is None:
+                get_console().print(f"{label}: unknown")
+                continue
+            max_cores = mode.cores.max if mode.cores is not None else "unknown"
+            max_ram = mode.ram.max if mode.ram is not None else "unknown"
+            get_console().print(f"{label}: {max_cores} Cores & {max_ram} GB")
 
     asyncio.run(_get_stats())

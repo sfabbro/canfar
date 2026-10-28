@@ -1,8 +1,7 @@
-"""Comprehensive tests for the Configuration model (V2)."""
+"""Comprehensive tests for the Configuration model."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -11,413 +10,704 @@ import pytest
 import yaml
 from pydantic import AnyHttpUrl, AnyUrl, ValidationError
 
-from canfar.models.auth import OIDC, X509, Client, Endpoint, Expiry, Token
-from canfar.models.config import Configuration
-from canfar.models.http import Server
+from canfar.models.active import ActiveConfig
+from canfar.models.auth import (
+    Client,
+    Endpoint,
+    Expiry,
+    OIDCCredential,
+    Token,
+    X509Credential,
+)
+from canfar.models.config import Configuration, _CanfarEnvSettingsSource
+from canfar.models.http import Server, VOSpaceService
 from canfar.models.registry import ContainerRegistry
+
+
+def _sample_config(**overrides: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "version": 2,
+        "active": {
+            "authentication": "cadc",
+            "server": "canfar",
+        },
+        "authentication": {
+            "cadc": {
+                "mode": "x509",
+                "path": "/test/cert.pem",
+                "expiry": 1234567890.0,
+            },
+        },
+        "servers": {
+            "canfar": {
+                "idp": "cadc",
+                "uri": "ivo://cadc.nrc.ca/skaha",
+                "url": "https://ws-uv.canfar.net/skaha",
+                "version": "v1",
+                "auths": ["x509"],
+            },
+        },
+    }
+    payload.update(overrides)
+    return payload
 
 
 class TestConfigurationDefaults:
     """Test default state and initialization."""
 
-    def test_default_initialization(self) -> None:
-        """Test Configuration with correct defaults when no arguments provided."""
-        config = Configuration()
+    def test_default_servers_dict_keyed_by_server_name(self, tmp_path: Path) -> None:
+        """Default Science Platform Servers are keyed by Server Name."""
+        config_path = tmp_path / "config.yaml"
+        with patch("canfar.models.config.CONFIG_PATH", config_path):
+            config = Configuration()
 
-        # Test default active context
-        assert config.active == "default"
+        assert set(config.servers) == {"canfar"}
+        assert config.servers["canfar"].name == "canfar"
+        dumped = config.model_dump(mode="json", exclude_none=True)
+        assert dumped["servers"]["canfar"]["name"] == "canfar"
 
-        # Test default contexts structure
-        assert isinstance(config.contexts, dict)
-        assert "default" in config.contexts
-        assert len(config.contexts) == 1
+    def test_default_canfar_server_ships_arc_and_vault_storage(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """The CADC Science Platform Server exposes both VOSpace Services."""
+        config_path = tmp_path / "config.yaml"
+        with patch("canfar.models.config.CONFIG_PATH", config_path):
+            config = Configuration()
 
-        # Test default context is X509
-        default_context = config.contexts["default"]
-        assert isinstance(default_context, X509)
-        assert default_context.mode == "x509"
+        assert set(config.servers["canfar"].storage) == {"arc", "vault"}
+        for name, endpoint in (
+            ("arc", "https://ws-uv.canfar.net/arc"),
+            ("vault", "https://cadc-west-01.canfar.net/vault"),
+        ):
+            service = config.servers["canfar"].storage[name]
+            assert str(service.url).rstrip("/") == endpoint
 
-        # Test default X509 configuration
-        assert default_context.path == Path.home() / ".ssl" / "cadcproxy.pem"
-        # Note: expiry may be computed from actual cert file if it exists
-        assert isinstance(default_context.expiry, float)
+    def test_storage_resolution_belongs_to_storage_module(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Configuration stores VOSpace metadata without resolving it."""
+        with patch("canfar.models.config.CONFIG_PATH", tmp_path / "config.yaml"):
+            config = Configuration()
 
-        # Test default server configuration
-        assert isinstance(default_context.server, Server)
-        assert default_context.server.name == "CADC-CANFAR"
-        assert str(default_context.server.uri) == "ivo://cadc.nrc.ca/skaha"
-        assert str(default_context.server.url) == "https://ws-uv.canfar.net/skaha"
-        assert default_context.server.version == "v1"
+        assert not hasattr(config, "storage_identifiers")
+        assert not hasattr(config, "_resolve_storage")
 
-        # Test default registry
+    def test_default_authentication_dict_keyed_by_idp(self, tmp_path: Path) -> None:
+        """Default Authentication Records are keyed by IDP."""
+        config_path = tmp_path / "config.yaml"
+        with patch("canfar.models.config.CONFIG_PATH", config_path):
+            config = Configuration()
+
+        assert set(config.authentication) == {"cadc"}
+        assert isinstance(config.authentication["cadc"], X509Credential)
+        assert config.authentication["cadc"].idp == "cadc"
+        dumped = config.model_dump(mode="json", exclude_none=True)
+        assert dumped["authentication"]["cadc"]["idp"] == "cadc"
+
+    def test_default_initialization(self, tmp_path: Path) -> None:
+        """Configuration defaults to the CADC placeholder when no file exists."""
+        config_path = tmp_path / "config.yaml"
+        with patch("canfar.models.config.CONFIG_PATH", config_path):
+            config = Configuration()
+
+        assert config.version == 2
+        assert config.active.authentication == "cadc"
+        assert config.active.server == "canfar"
+        assert set(config.authentication) == {"cadc"}
+        assert isinstance(config.authentication["cadc"], X509Credential)
+        assert set(config.servers) == {"canfar"}
+        assert config.servers["canfar"].name == "canfar"
         assert isinstance(config.registry, ContainerRegistry)
-        assert config.registry.url is None
-        assert config.registry.username is None
-        assert config.registry.secret is None
+
+    def test_default_records_are_not_shared(self, tmp_path: Path) -> None:
+        """Editing one default Configuration leaves the next one unchanged."""
+        with patch("canfar.models.config.CONFIG_PATH", tmp_path / "config.yaml"):
+            first = Configuration()
+            first.active.servers["cadc"] = "canfar"
+            first.authentication["cadc"].expiry = 42.0
+            first.servers["canfar"].storage.clear()
+            second = Configuration()
+
+        assert second.active.servers == {}
+        assert second.authentication["cadc"].expiry == 0.0
+        assert set(second.servers["canfar"].storage) == {"arc", "vault"}
 
     def test_model_config_settings(self) -> None:
-        """Test model configuration settings are properly applied."""
-        # Test extra fields are forbidden
+        """Extra fields are forbidden on the configuration model."""
         with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
             Configuration(invalid_field="value")  # type: ignore[call-arg]
-
-        # Test case insensitive environment variable handling
-        with patch.dict(os.environ, {"CANFAR_ACTIVE": "test"}):
-            # This should work even though we use lowercase in the model
-            config = Configuration(contexts={"test": X509(expiry=1234567890.0)})
-            assert config.active == "test"
 
 
 class TestConfigurationValidation:
     """Test data integrity and validation."""
 
-    def test_valid_active_context(self) -> None:
-        """Test validation passes when active context exists in contexts."""
-        contexts = {
-            "test": X509(path=Path("/test/cert.pem"), expiry=1234567890.0),
-            "prod": OIDC(
-                endpoints=Endpoint(),
-                client=Client(),
-                token=Token(),
-                server=Server(),
-                expiry=Expiry(),
-            ),
+    @pytest.mark.parametrize(
+        "server_name",
+        ["1bad", "bad.name", ""],
+    )
+    def test_invalid_server_name_key_rejected(self, server_name: str) -> None:
+        """Invalid Server Name keys fail validation with a clear message."""
+        with pytest.raises(ValidationError, match="Invalid server name"):
+            Configuration(
+                servers={
+                    server_name: Server(
+                        idp="cadc",
+                        uri=AnyUrl("ivo://cadc.nrc.ca/skaha"),
+                        url=AnyHttpUrl("https://ws-uv.canfar.net/skaha"),
+                        version="v1",
+                    ),
+                },
+            )
+
+    @pytest.mark.parametrize(
+        "idp_key",
+        ["1bad", "bad.key", ""],
+    )
+    def test_invalid_idp_key_rejected(self, idp_key: str) -> None:
+        """Invalid IDP keys fail validation with a clear message."""
+        with pytest.raises(ValidationError, match="Invalid IDP key"):
+            Configuration(
+                authentication={
+                    idp_key: X509Credential(
+                        idp=idp_key or "cadc",
+                        path=Path("/test/cert.pem"),
+                        expiry=1.0,
+                    ),
+                },
+            )
+
+    @pytest.mark.parametrize(
+        "storage_name",
+        [
+            "",
+            "local",
+            " local ",
+            "archive:old",
+            "archive\x00old",
+            "archive\nold",
+            "archive\n",
+            "archive\r",
+            "archive\r\n",
+            "-archive",
+        ],
+    )
+    def test_invalid_storage_name_rejected(
+        self, storage_name: str, tmp_path: Path
+    ) -> None:
+        """Invalid Storage Identifiers fail with the rejected name and constraints."""
+        with (
+            patch("canfar.models.config.CONFIG_PATH", tmp_path / "config.yaml"),
+            pytest.raises(
+                ValidationError, match="Invalid Storage Identifier"
+            ) as exc_info,
+        ):
+            Configuration.model_validate(
+                {
+                    "servers": {
+                        "canfar": {
+                            "storage": {
+                                storage_name: {
+                                    "uri": "ivo://cadc.nrc.ca/arc",
+                                    "url": "https://ws-cadc.canfar.net/arc",
+                                }
+                            }
+                        }
+                    }
+                }
+            )
+
+        assert repr(storage_name) in str(exc_info.value)
+
+    def test_long_storage_name_allowed(self) -> None:
+        """Storage Identifiers do not inherit Server field length limits."""
+        storage_name = "a" * 257
+        service = {
+            "uri": "ivo://cadc.nrc.ca/arc",
+            "url": "https://ws-cadc.canfar.net/arc",
         }
 
-        # Should work with existing context
-        config = Configuration(active="test", contexts=contexts)
-        assert config.active == "test"
+        server = Server(storage={storage_name: service})
 
-        # Should work with different existing context
-        config = Configuration(active="prod", contexts=contexts)
-        assert config.active == "prod"
+        assert list(server.storage) == [storage_name]
 
-    def test_invalid_active_context(self) -> None:
-        """Test validation fails when active context doesn't exist in contexts."""
-        contexts = {
-            "test": X509(path=Path("/test/cert.pem"), expiry=1234567890.0),
-            "prod": OIDC(
-                endpoints=Endpoint(),
-                client=Client(),
-                token=Token(),
-                server=Server(),
-                expiry=Expiry(),
+    @pytest.mark.parametrize("storage_name", ["filesystem", "identifiers", "sources"])
+    def test_storage_name_can_match_storage_module_member(
+        self,
+        storage_name: str,
+    ) -> None:
+        """Module members are not reserved when lookup is explicit."""
+        service = {
+            "uri": "ivo://cadc.nrc.ca/arc",
+            "url": "https://ws-cadc.canfar.net/arc",
+        }
+
+        server = Server(storage={storage_name: service})
+
+        assert list(server.storage) == [storage_name]
+
+    def test_storage_name_whitespace_is_trimmed(self) -> None:
+        """Valid surrounding whitespace remains normalized."""
+        service = {
+            "uri": "ivo://cadc.nrc.ca/arc",
+            "url": "https://ws-cadc.canfar.net/arc",
+        }
+
+        assert list(Server(storage={" arc ": service}).storage) == ["arc"]
+
+    def test_duplicate_storage_name_across_servers_rejected(
+        self, tmp_path: Path
+    ) -> None:
+        """A Storage Identifier names one service across Science Platform Servers."""
+        service = VOSpaceService(
+            uri="ivo://cadc.nrc.ca/arc",
+            url="https://ws-cadc.canfar.net/arc",
+        )
+
+        with (
+            patch("canfar.models.config.CONFIG_PATH", tmp_path / "config.yaml"),
+            pytest.raises(
+                ValidationError,
+                match=(
+                    "Duplicate Storage Identifier 'shared' in Science Platform Servers "
+                    "'canfar' and 'srcnet'"
+                ),
             ),
+        ):
+            Configuration.model_validate(
+                {
+                    "servers": {
+                        "canfar": Server(storage={"shared": service}),
+                        "srcnet": Server(storage={"shared": service}),
+                    }
+                }
+            )
+
+    def test_normalized_storage_name_collision_rejected(self) -> None:
+        """Whitespace normalization cannot silently replace a VOSpace Service."""
+        service = {
+            "uri": "ivo://cadc.nrc.ca/arc",
+            "url": "https://ws-cadc.canfar.net/arc",
         }
 
         with pytest.raises(
-            ValidationError, match="Active context 'nonexistent' not found"
+            ValidationError,
+            match="Storage Identifiers 'arc' and ' arc ' both normalize to 'arc'",
         ):
-            Configuration(active="nonexistent", contexts=contexts)
+            Server(storage={"arc": service, " arc ": service})
 
-    def test_custom_active_with_matching_context(self) -> None:
-        """Test validation succeeds with custom active and matching context."""
-        custom_context = X509(
-            path=Path("/custom/cert.pem"),
-            expiry=1234567890.0,
-            server=Server(
-                name="Custom Server",
-                uri=AnyUrl("ivo://custom.org/skaha"),
-                url=AnyHttpUrl("https://custom.org/skaha"),
-                version="v1",
-            ),
-        )
-
+    def test_valid_active_references(self) -> None:
+        """Validation passes when active authentication and server exist."""
         config = Configuration(
-            active="custom",
-            contexts={"custom": custom_context},
+            active=ActiveConfig(
+                authentication="cadc",
+                server="canfar",
+            ),
+            authentication={
+                "cadc": X509Credential(
+                    idp="cadc", path=Path("/test/cert.pem"), expiry=1.0
+                ),
+            },
+            servers={
+                "canfar": Server(
+                    idp="cadc",
+                    uri=AnyUrl("ivo://cadc.nrc.ca/skaha"),
+                    url=AnyHttpUrl("https://ws-uv.canfar.net/skaha"),
+                    version="v1",
+                ),
+            },
         )
+        assert config.active.authentication == "cadc"
+        assert config.active.server == "canfar"
 
-        assert config.active == "custom"
-        assert config.contexts["custom"] == custom_context
+    def test_invalid_active_authentication(self) -> None:
+        """Validation fails when active authentication is unknown."""
+        with pytest.raises(
+            ValidationError,
+            match="Active authentication 'missing' not found",
+        ):
+            Configuration(
+                active=ActiveConfig(
+                    authentication="missing",
+                    server="canfar",
+                ),
+                authentication={
+                    "cadc": X509Credential(
+                        idp="cadc", path=Path("/test/cert.pem"), expiry=1.0
+                    ),
+                },
+                servers={
+                    "canfar": Server(
+                        idp="cadc",
+                        uri=AnyUrl("ivo://cadc.nrc.ca/skaha"),
+                        url=AnyHttpUrl("https://ws-uv.canfar.net/skaha"),
+                        version="v1",
+                    ),
+                },
+            )
+
+    def test_invalid_active_server(self) -> None:
+        """Validation fails when active Server Name is unknown."""
+        with pytest.raises(
+            ValidationError,
+            match=r"Active server 'missing' not found",
+        ):
+            Configuration(
+                active=ActiveConfig(
+                    authentication="cadc",
+                    server="missing",
+                ),
+                authentication={
+                    "cadc": X509Credential(
+                        idp="cadc", path=Path("/test/cert.pem"), expiry=1.0
+                    ),
+                },
+                servers={
+                    "canfar": Server(
+                        idp="cadc",
+                        uri=AnyUrl("ivo://cadc.nrc.ca/skaha"),
+                        url=AnyHttpUrl("https://ws-uv.canfar.net/skaha"),
+                        version="v1",
+                    ),
+                },
+            )
+
+    def test_invalid_remembered_server_name(self) -> None:
+        """Validation fails when remembered selection names a missing server."""
+        with pytest.raises(
+            ValidationError,
+            match=r"Remembered server 'missing' not found",
+        ):
+            Configuration(
+                active=ActiveConfig(
+                    authentication="cadc",
+                    server="canfar",
+                    servers={"cadc": "missing"},
+                ),
+                authentication={
+                    "cadc": X509Credential(
+                        idp="cadc", path=Path("/test/cert.pem"), expiry=1.0
+                    ),
+                },
+                servers={
+                    "canfar": Server(
+                        idp="cadc",
+                        uri=AnyUrl("ivo://cadc.nrc.ca/skaha"),
+                        url=AnyHttpUrl("https://ws-uv.canfar.net/skaha"),
+                        version="v1",
+                    ),
+                },
+            )
 
 
 class TestConfigurationSerialization:
     """Test save/load functionality and round-trip serialization."""
 
     def test_complex_round_trip_serialization(self, tmp_path: Path) -> None:
-        """Test complex configuration can be saved and perfectly loaded back."""
-        # Create complex configuration with multiple contexts
-        oidc_context = OIDC(
+        """Complex configuration can be saved and loaded back."""
+        oidc = OIDCCredential(
+            idp="srcnet",
             endpoints=Endpoint(
-                discovery="https://oidc.example.com/.well-known/openid_configuration",
-                token="https://oidc.example.com/token",
-                device="https://oidc.example.com/device",
-                registration="https://oidc.example.com/register",
+                discovery="https://example.com/.well-known/openid-configuration",
+                token="https://example.com/token",
             ),
-            client=Client(
-                identity="test-client-id",
-                secret="test-client-secret",
-            ),
+            client=Client(identity="client-id", secret="client-secret"),
             token=Token(
-                access="test-access-token",
-                refresh="test-refresh-token",
+                access="access-token",
+                refresh="refresh-token",
+                token_type="Bearer",
+                scope="openid profile email",
             ),
-            server=Server(
-                name="OIDC-Server",
-                uri=AnyUrl("ivo://oidc.example.com/skaha"),
-                url=AnyHttpUrl("https://oidc.example.com/skaha"),
-                version="v2",
-            ),
-            expiry=Expiry(
-                access=1234567890.0,
-                refresh=1234567890.0,
-            ),
+            expiry=Expiry(access=1893456000),
         )
-
-        x509_context = X509(
+        x509 = X509Credential(
+            idp="cadc",
             path=Path("/custom/path/cert.pem"),
             expiry=9876543210.0,
-            server=Server(
-                name="X509-Server",
-                uri=AnyUrl("ivo://x509.example.com/skaha"),
-                url=AnyHttpUrl("https://x509.example.com/skaha"),
-                version="v3",
-            ),
         )
-
         registry = ContainerRegistry(
             url=AnyHttpUrl("https://registry.example.com"),
             username="test-user",
             secret="test-secret",
         )
-
-        # Create configuration with non-default active context
-        original_config = Configuration(
-            active="OIDC-Server",
-            contexts={
-                "OIDC-Server": oidc_context,
-                "X509-Server": x509_context,
+        original = Configuration(
+            active=ActiveConfig(
+                authentication="srcnet",
+                server="SRCNet",
+            ),
+            authentication={"srcnet": oidc, "cadc": x509},
+            servers={
+                "SRCNet": Server(
+                    idp="srcnet",
+                    uri=AnyUrl("ivo://srcnet.example/skaha"),
+                    url=AnyHttpUrl("https://srcnet.example/skaha"),
+                    version="v1",
+                    auths=["oidc"],
+                ),
+                "canfar": Server(
+                    idp="cadc",
+                    uri=AnyUrl("ivo://cadc.nrc.ca/skaha"),
+                    url=AnyHttpUrl("https://ws-uv.canfar.net/skaha"),
+                    version="v1",
+                    auths=["x509"],
+                ),
             },
             registry=registry,
         )
 
-        # Save to temporary file
         temp_config_path = tmp_path / "config.yaml"
         with patch("canfar.models.config.CONFIG_PATH", temp_config_path):
-            original_config.save()
+            original.editor.save()
+            loaded = Configuration()
 
-            # Load from temporary file
-            loaded_config = Configuration()
+        assert loaded.active.authentication == "srcnet"
+        assert loaded.registry.username == "test-user"
+        loaded_oidc = loaded.authentication["srcnet"]
+        assert isinstance(loaded_oidc, OIDCCredential)
+        assert loaded_oidc.client.secret is not None
+        assert loaded_oidc.client.secret.get_secret_value() == "client-secret"
+        assert loaded_oidc.token.access is not None
+        assert loaded_oidc.token.access.get_secret_value() == "access-token"
+        assert loaded_oidc.token.refresh is not None
+        assert loaded_oidc.token.refresh.get_secret_value() == "refresh-token"
+        assert loaded_oidc.token.token_type == "Bearer"
+        assert loaded_oidc.token.scope == "openid profile email"
+        assert loaded_oidc.expiry.access == 1893456000
+        assert loaded_oidc.expiry.refresh is None
 
-        # Assert perfect equivalence
-        assert loaded_config.active == original_config.active
-        assert loaded_config.active == "OIDC-Server"
-
-        # Assert contexts match
-        assert set(loaded_config.contexts.keys()) == set(
-            original_config.contexts.keys()
+    def test_v1_storage_json_and_yaml_round_trip(self, tmp_path: Path) -> None:
+        """Multiple VOSpace Services retain stable nested Storage Identifiers."""
+        config = Configuration.model_validate(
+            _sample_config(
+                servers={
+                    "canfar": {
+                        **_sample_config()["servers"]["canfar"],
+                        "storage": {
+                            "canSRC": {
+                                "uri": "ivo://cadc.nrc.ca/arc",
+                                "url": "https://ws-cadc.canfar.net/arc",
+                            },
+                            "canSRCs3": {
+                                "uri": "ivo://cadc.nrc.ca/arc-s3",
+                                "url": "https://ws-cadc.canfar.net/arc-s3",
+                            },
+                        },
+                    }
+                }
+            )
         )
-        assert "OIDC-Server" in loaded_config.contexts
-        assert "X509-Server" in loaded_config.contexts
 
-        # Assert OIDC context details
-        loaded_oidc = loaded_config.contexts["OIDC-Server"]
-        assert isinstance(loaded_oidc, OIDC)
-        assert loaded_oidc.endpoints.discovery == oidc_context.endpoints.discovery
-        assert loaded_oidc.client.identity == oidc_context.client.identity
-        assert loaded_oidc.token.access == oidc_context.token.access
-        assert loaded_oidc.server.name == oidc_context.server.name
+        json_data = config.model_dump(mode="json")
+        assert list(json_data["servers"]["canfar"]["storage"]) == [
+            "canSRC",
+            "canSRCs3",
+        ]
+        assert "name" not in json_data["servers"]["canfar"]["storage"]["canSRC"]
+        assert Configuration.model_validate_json(config.model_dump_json()) == config
 
-        # Assert X509 context details
-        loaded_x509 = loaded_config.contexts["X509-Server"]
-        assert isinstance(loaded_x509, X509)
-        assert loaded_x509.path == x509_context.path
-        assert loaded_x509.expiry == x509_context.expiry
-        if loaded_x509.server is not None and x509_context.server is not None:
-            assert loaded_x509.server.name == x509_context.server.name
+        config_path = tmp_path / "config.yaml"
+        with patch("canfar.models.config.CONFIG_PATH", config_path):
+            config.editor.save()
+            loaded = Configuration()
 
-        # Assert registry details
-        assert loaded_config.registry.url == registry.url
-        assert loaded_config.registry.username == registry.username
-        assert loaded_config.registry.secret == registry.secret
+        assert list(loaded.servers["canfar"].storage) == ["canSRC", "canSRCs3"]
+        assert loaded.servers["canfar"].idp == "cadc"
+        assert loaded == config
+
+    def test_version_2_configuration_without_storage_loads_unchanged(
+        self, tmp_path: Path
+    ) -> None:
+        """A version 2 Server without storage is not rewritten on load."""
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(_sample_config()), encoding="utf-8")
+        original = config_path.read_bytes()
+
+        with patch("canfar.models.config.CONFIG_PATH", config_path):
+            config = Configuration()
+
+        assert config.version == 2
+        assert config.servers["canfar"].storage == {}
+        assert config_path.read_bytes() == original
 
     def test_save_creates_directory(self, tmp_path: Path) -> None:
-        """Test save method creates parent directories if they don't exist."""
+        """Save creates parent directories when missing."""
         config = Configuration()
         nested_path = tmp_path / "nested" / "config.yaml"
-
         with patch("canfar.models.config.CONFIG_PATH", nested_path):
-            config.save()
-
+            config.editor.save()
         assert nested_path.exists()
-        assert nested_path.parent.exists()
+
+    def test_failed_serialization_preserves_existing_configuration(
+        self, tmp_path: Path
+    ) -> None:
+        """A failed save cannot truncate the last valid configuration."""
+        config = Configuration()
+        config_path = tmp_path / "config.yaml"
+        original = b"version: 1\nmarker: keep-me\n"
+        config_path.write_bytes(original)
+
+        with (
+            patch("canfar.models.config.CONFIG_PATH", config_path),
+            patch(
+                "canfar.config.editor.yaml.dump",
+                side_effect=TypeError("cannot serialize"),
+            ),
+            pytest.raises(OSError, match="Failed to save configuration"),
+        ):
+            config.editor.save()
+
+        assert config_path.read_bytes() == original
+
+    def test_invalid_assignment_cannot_replace_last_valid_configuration(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Saving validates assignment-mutated state before atomic replacement."""
+        config_path = tmp_path / "config.yaml"
+
+        with patch("canfar.models.config.CONFIG_PATH", config_path):
+            config = Configuration()
+            config.editor.save()
+            original = config_path.read_bytes()
+            config.active.authentication = "missing"
+
+            with pytest.raises(OSError, match="Failed to save configuration"):
+                config.editor.save()
+
+            loaded = Configuration()
+
+        assert config_path.read_bytes() == original
+        assert loaded.active.authentication == "cadc"
+        assert set(tmp_path.iterdir()) == {config_path}
+
+    def test_failed_replacement_preserves_existing_configuration(
+        self, tmp_path: Path
+    ) -> None:
+        """A failed atomic replacement leaves no partial configuration behind."""
+        config = Configuration()
+        config_path = tmp_path / "config.yaml"
+        original = b"version: 1\nmarker: keep-me\n"
+        config_path.write_bytes(original)
+
+        with (
+            patch("canfar.models.config.CONFIG_PATH", config_path),
+            patch(
+                "canfar.config.editor.Path.replace",
+                side_effect=OSError("cannot replace"),
+            ),
+            pytest.raises(OSError, match="Failed to save configuration"),
+        ):
+            config.editor.save()
+
+        assert config_path.read_bytes() == original
+        assert set(tmp_path.iterdir()) == {config_path}
+
+    def test_failed_first_write_leaves_no_configuration(self, tmp_path: Path) -> None:
+        """A failed first save leaves neither a target nor temporary file."""
+        config = Configuration()
+        config_path = tmp_path / "config.yaml"
+
+        with (
+            patch("canfar.models.config.CONFIG_PATH", config_path),
+            patch("canfar.config.editor.os.fsync", side_effect=OSError("disk full")),
+            pytest.raises(OSError, match="Failed to save configuration"),
+        ):
+            config.editor.save()
+
+        assert not config_path.exists()
+        assert list(tmp_path.iterdir()) == []
 
     def test_yaml_file_content_structure(self, tmp_path: Path) -> None:
-        """Test saved YAML file has correct structure and content."""
-        config = Configuration(
-            active="test",
-            contexts={"test": X509(path=Path("/test.pem"), expiry=1234567890.0)},
-        )
-
+        """Saved YAML uses current top-level keys."""
         temp_config_path = tmp_path / "config.yaml"
         with patch("canfar.models.config.CONFIG_PATH", temp_config_path):
-            config.save()
+            config = Configuration(
+                authentication={
+                    "cadc": X509Credential(
+                        idp="cadc", path=Path("/test.pem"), expiry=1234567890.0
+                    ),
+                },
+            )
+            config.editor.save()
 
-        # Read and verify YAML content
-        with temp_config_path.open(encoding="utf-8") as f:
-            yaml_data = yaml.safe_load(f)
-
-        assert yaml_data["active"] == "test"
-        assert "contexts" in yaml_data
-        assert "test" in yaml_data["contexts"]
-        assert yaml_data["contexts"]["test"]["mode"] == "x509"
+        yaml_data = yaml.safe_load(temp_config_path.read_text(encoding="utf-8"))
+        assert yaml_data["version"] == 2
+        assert yaml_data["active"]["authentication"] == "cadc"
+        assert yaml_data["authentication"]["cadc"]["mode"] == "x509"
+        assert yaml_data["authentication"]["cadc"]["idp"] == "cadc"
+        assert yaml_data["servers"]["canfar"]["name"] == "canfar"
         assert "registry" in yaml_data
-
-
-class TestConfigurationContext:
-    """Test context property functionality."""
-
-    def test_context_property_returns_active_context(self) -> None:
-        """Test context property returns the currently active AuthContext object."""
-        x509_context = X509(path=Path("/test.pem"), expiry=1234567890.0)
-        oidc_context = OIDC(
-            endpoints=Endpoint(),
-            client=Client(),
-            token=Token(),
-            server=Server(),
-            expiry=Expiry(),
-        )
-
-        config = Configuration(
-            active="x509",
-            contexts={
-                "x509": x509_context,
-                "oidc": oidc_context,
-            },
-        )
-
-        # Should return X509 context when active is "x509"
-        assert config.context is x509_context
-        assert isinstance(config.context, X509)
-
-        # Change active context
-        config.active = "oidc"
-
-        # Should now return OIDC context
-        assert config.context is oidc_context
-        assert isinstance(config.context, OIDC)
-
-    def test_context_property_with_default(self) -> None:
-        """Test context property works with default configuration."""
-        config = Configuration()
-
-        context = config.context
-        assert isinstance(context, X509)
-        assert context.mode == "x509"
-        assert context is config.contexts["default"]
 
 
 class TestConfigurationSettingsPrecedence:
     """Test layered settings precedence."""
 
-    def test_environment_overrides_yaml_config(
+    def test_nested_active_env_overrides_yaml(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Test environment variables take precedence over YAML file settings."""
-        # Create temporary config file with one active value
-        config_data: dict[str, Any] = {
-            "active": "yaml_default",
-            "contexts": {
-                "yaml_default": {
-                    "mode": "x509",
-                    "path": "/yaml/cert.pem",
-                    "expiry": 1234567890.0,
-                },
-                "env_override": {
-                    "mode": "x509",
-                    "path": "/env/cert.pem",
-                    "expiry": 9876543210.0,
-                },
-            },
+        """Nested active env vars override YAML active selection."""
+        config_data = _sample_config()
+        config_data["servers"]["SRCNet"] = {
+            "idp": "srcnet",
+            "uri": "ivo://srcnet.example/skaha",
+            "url": "https://srcnet.example/skaha",
+            "version": "v1",
+            "auths": ["oidc"],
         }
-
+        config_data["authentication"]["srcnet"] = {
+            "mode": "oidc",
+            "endpoints": {},
+            "client": {},
+            "token": {},
+            "expiry": {},
+        }
         temp_config_path = tmp_path / "config.yaml"
-        with temp_config_path.open("w", encoding="utf-8") as f:
-            yaml.dump(config_data, f)
+        temp_config_path.write_text(yaml.dump(config_data), encoding="utf-8")
 
-        # Set environment variable to override
-        monkeypatch.setenv("CANFAR_ACTIVE", "env_override")
+        monkeypatch.setenv("CANFAR_ACTIVE__AUTHENTICATION", "srcnet")
+        monkeypatch.setenv("CANFAR_ACTIVE__SERVER", "SRCNet")
 
-        # Load configuration
         with patch("canfar.models.config.CONFIG_PATH", temp_config_path):
             config = Configuration()
 
-        # Environment variable should take precedence
-        assert config.active == "env_override"
-
-        # Verify the context exists and is correct
-        assert "env_override" in config.contexts
-        assert isinstance(config.contexts["env_override"], X509)
+        assert config.active.authentication == "srcnet"
+        assert config.active.server == "SRCNet"
 
     def test_init_args_override_all_sources(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Test init arguments override both environment and file settings."""
-        # Create temporary config file
-        config_data: dict[str, Any] = {
-            "active": "yaml_default",
-            "contexts": {
-                "yaml_default": {
-                    "mode": "x509",
-                    "path": "/yaml/cert.pem",
-                    "expiry": 1234567890.0,
-                },
-                "env_override": {
-                    "mode": "x509",
-                    "path": "/env/cert.pem",
-                    "expiry": 9876543210.0,
-                },
-                "init_override": {
-                    "mode": "x509",
-                    "path": "/init/cert.pem",
-                    "expiry": 5555555555.0,
-                },
-            },
-        }
-
+        """Init arguments take precedence over env and YAML."""
         temp_config_path = tmp_path / "config.yaml"
-        with temp_config_path.open("w", encoding="utf-8") as f:
-            yaml.dump(config_data, f)
+        temp_config_path.write_text(yaml.dump(_sample_config()), encoding="utf-8")
+        monkeypatch.setenv("CANFAR_ACTIVE__AUTHENTICATION", "srcnet")
+        monkeypatch.setenv("CANFAR_ACTIVE__SERVER", "SRCNet")
 
-        # Set environment variable
-        monkeypatch.setenv("CANFAR_ACTIVE", "env_override")
-
-        # Load configuration with init args
+        override = ActiveConfig(
+            authentication="cadc",
+            server="canfar",
+        )
         with patch("canfar.models.config.CONFIG_PATH", temp_config_path):
-            config = Configuration(active="init_override")
+            config = Configuration(active=override)
 
-        # Init args should take highest precedence
-        assert config.active == "init_override"
+        assert config.active.authentication == "cadc"
 
     def test_yaml_loads_when_no_env_or_init(self, tmp_path: Path) -> None:
-        """Test YAML file settings are used when no environment or init overrides."""
-        config_data: dict[str, Any] = {
-            "active": "yaml_context",
-            "contexts": {
-                "yaml_context": {
-                    "mode": "x509",
-                    "path": "/yaml/cert.pem",
-                    "expiry": 1234567890.0,
-                },
-            },
-            "registry": {
+        """YAML settings apply when no env or init overrides exist."""
+        config_data = _sample_config(
+            registry={
                 "url": "https://yaml.registry.com",
                 "username": "yaml_user",
                 "secret": "yaml_secret",
             },
-        }
-
+        )
         temp_config_path = tmp_path / "config.yaml"
-        with temp_config_path.open("w", encoding="utf-8") as f:
-            yaml.dump(config_data, f)
+        temp_config_path.write_text(yaml.dump(config_data), encoding="utf-8")
 
         with patch("canfar.models.config.CONFIG_PATH", temp_config_path):
             config = Configuration()
 
-        assert config.active == "yaml_context"
         assert config.registry.username == "yaml_user"
-        # URL may have trailing slash added by pydantic
         assert str(config.registry.url).rstrip("/") == "https://yaml.registry.com"
 
 
@@ -425,50 +715,42 @@ class TestConfigurationErrorHandling:
     """Test error handling scenarios."""
 
     def test_save_handles_directory_creation_error(self, tmp_path: Path) -> None:
-        """Test save method handles directory creation errors gracefully."""
+        """Save surfaces directory creation errors."""
         config = Configuration()
-
-        # Mock pathlib.Path.mkdir to raise an OSError
         config_path = tmp_path / "blocked" / "config.yaml"
-
         with (
             patch("canfar.models.config.CONFIG_PATH", config_path),
             patch("pathlib.Path.mkdir", side_effect=OSError("Permission denied")),
             pytest.raises(OSError, match="Permission denied"),
         ):
-            config.save()
+            config.editor.save()
 
     def test_save_handles_file_write_error(self, tmp_path: Path) -> None:
-        """Test save method handles file write errors gracefully."""
+        """Save surfaces file write errors."""
         config = Configuration()
-
-        # Create a directory where we want to write a file (will cause OSError)
         config_path = tmp_path / "config.yaml"
-        config_path.mkdir()  # Make it a directory instead of a file
-
+        config_path.mkdir()
         error_msg = f"Failed to save configuration to {config_path}"
         with (
             patch("canfar.models.config.CONFIG_PATH", config_path),
             pytest.raises(OSError, match=error_msg),
         ):
-            config.save()
+            config.editor.save()
 
     def test_save_handles_yaml_serialization_error(self, tmp_path: Path) -> None:
-        """Test save method handles YAML serialization errors."""
+        """Save surfaces YAML serialization errors."""
         config = Configuration()
         config_path = tmp_path / "config.yaml"
-
-        # Mock yaml.dump to raise an error
         error_msg = f"Failed to save configuration to {config_path}"
         with (
             patch("canfar.models.config.CONFIG_PATH", config_path),
             patch("yaml.dump", side_effect=TypeError("Mock YAML error")),
             pytest.raises(OSError, match=error_msg),
         ):
-            config.save()
+            config.editor.save()
 
     def test_settings_customise_sources_order(self) -> None:
-        """Test settings sources are ordered correctly for precedence."""
+        """Settings sources preserve expected precedence ordering."""
         sources = Configuration.settings_customise_sources(
             Configuration,
             init_settings=None,  # type: ignore[arg-type]
@@ -476,15 +758,7 @@ class TestConfigurationErrorHandling:
             dotenv_settings=None,  # type: ignore[arg-type]
             file_secret_settings=None,  # type: ignore[arg-type]
         )
-
-        # Should return 4 sources in correct precedence order
         assert len(sources) == 4
-
-        # First should be init_settings (highest precedence)
-        # Second should be env_settings
-        # Third should be YamlConfigSettingsSource
-        # Fourth should be file_secret_settings (lowest precedence)
-        assert sources[0] is None  # init_settings (mocked as None)
-        assert sources[1] is None  # env_settings (mocked as None)
-        # sources[2] should be YamlConfigSettingsSource instance
-        assert sources[3] is None  # file_secret_settings (mocked as None)
+        assert sources[0] is None
+        assert isinstance(sources[1], _CanfarEnvSettingsSource)
+        assert sources[3] is None

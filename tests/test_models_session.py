@@ -117,9 +117,9 @@ class TestCreateSpec:
         assert spec.replicas == 1
 
         spec = CreateRequest(
-            name="test", image="skaha/test", kind="headless", replicas=512
+            name="test", image="skaha/test", kind="headless", replicas=256
         )
-        assert spec.replicas == 512
+        assert spec.replicas == 256
 
         # Invalid values
         with pytest.raises(ValidationError):
@@ -127,7 +127,7 @@ class TestCreateSpec:
 
         with pytest.raises(ValidationError):
             CreateRequest(
-                name="test", image="skaha/test", kind="headless", replicas=513
+                name="test", image="skaha/test", kind="headless", replicas=257
             )
 
     def test_kind_validation(self) -> None:
@@ -257,19 +257,6 @@ class TestFetchSpec:
 
         assert spec.kind is None
         assert spec.status is None
-        assert spec.view is None
-
-    def test_with_all_values(self) -> None:
-        """Test FetchSpec with all values."""
-        spec = FetchRequest(
-            type="headless",  # Using alias
-            status="Running",
-            view="all",
-        )
-
-        assert spec.kind == "headless"
-        assert spec.status == "Running"
-        assert spec.view == "all"
 
     def test_kind_validation(self) -> None:
         """Test kind field validation."""
@@ -295,16 +282,6 @@ class TestFetchSpec:
         spec = FetchRequest()
         assert spec.status is None
 
-    def test_view_validation(self) -> None:
-        """Test view field validation."""
-        # Valid view
-        spec = FetchRequest(view="all")
-        assert spec.view == "all"
-
-        # None is also valid (default)
-        spec = FetchRequest()
-        assert spec.view is None
-
     def test_kind_alias(self) -> None:
         """Test that kind field uses 'type' as alias."""
         # Using alias 'type'
@@ -320,11 +297,10 @@ class TestFetchSpec:
     def test_populate_by_name(self) -> None:
         """Test that model can be populated by field name or alias."""
         # Test with all fields using aliases
-        data = {"type": "headless", "status": "Running", "view": "all"}
+        data = {"type": "headless", "status": "Running"}
         spec = FetchRequest.model_validate(data)
         assert spec.kind == "headless"
         assert spec.status == "Running"
-        assert spec.view == "all"
 
     def test_model_config(self) -> None:
         """Test model configuration settings."""

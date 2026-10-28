@@ -1,131 +1,278 @@
-# Installation & Set-up
+# Install and set up
 
-This guide covers everything you need to install and start using CANFAR Science Platform servers worldwide.
+Use the CANFAR Python package to automate work on a Science Platform Server:
+launch Sessions, list Container Images, fetch logs, inspect state, and clean up
+resources.
 
-!!! tip "New to CANFAR?"
-    If you want to jump right in with a hands-on tutorial, check out our [5-Minute Quick Start](quick-start.md) guide first!
+## Install
 
-## Prerequisites
+!!! note "Client version"
 
-Before you can use CANFAR, you need:
+    These examples use the released v1.5.2 client. Unreleased additions are
+    marked on their own pages. Read [What's new](updates.md) and the
+    [upgrade guide](migration.md) before upgrading from v1.4.1.
 
-- **Python 3.10+** installed on your system
-- **A Science Platform account** - For CANFAR, [request an account with CADC](https://www.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/en/auth/request.html)
+    CANFAR Data's CLI and Python storage tools have been in beta since
+    v1.5.0. See the [Data guide](data.md) and
+    [community feedback routes](../platform/community/guidelines.md).
 
-## Installation
+### Use the published release
 
-Install `canfar` using `pip`:
-
-```bash
-pip install canfar --upgrade
-```
-
-!!! tip "Virtual Environments"
-    We recommend using a virtual environment to avoid conflicts with other packages:
-    ```bash
-    python -m venv canfar-env
-    source canfar-env/bin/activate  # On Windows: canfar-env\Scripts\activate
-    pip install canfar
-    ```
-
-## Authentication Set-up
-
-CANFAR uses an authentication context system to manage connections to multiple Science Platform servers. The easiest way to get started is with the CLI log in command.
-
-### Quick Authentication
-
-To authenticate with a Science Platform server:
+Install the released package for regular use, and use the documentation that
+matches that release:
 
 ```bash
-canfar auth login
+pip install --upgrade canfar
 ```
 
-This command will:
+With `uv`:
 
-1. **Discover available servers** worldwide
-2. **Guide you through server selection**
-3. **Handle the authentication process** (X.509 or OIDC)
-4. **Save your credentials** for future use
+```bash
+uv add canfar
+```
 
-!!! example "Example Login Flow"
-    ```bash
-    $ canfar auth login
-    Starting Science Platform Login
-    Discovery completed in 2.1s (5/18 active)
+### Install on an Intel Mac
 
-    Select a server:
-    » 🟢 CANFAR  CADC
-      🟢 Canada  SRCnet
-      🟢 UK-CAM  SRCnet
+`cryptography` 49.0.0 and later publish no Intel macOS wheels, so a plain
+install on an Intel Mac tries to compile it and fails with
+`Failed to build cryptography`. Install canfar as a [uv](https://docs.astral.sh/uv/)
+tool from wheels only. You get `cryptography` 48.0.1, the last Intel release,
+in an environment of its own, without Homebrew or a compiler:
 
-    X509 Certificate Authentication
-    Username: your-username
-    Password: ***********
-    ✓ Login completed successfully!
+```bash
+uv tool install canfar --no-build-package cryptography
+```
+
+uv remembers the option, so later upgrades need no extra flags:
+
+```bash
+uv tool upgrade canfar
+```
+
+Do not run `uv run pip install …`: uv-managed Python rejects it with
+`error: externally-managed-environment`.
+
+!!! warning "cryptography 48.0.1 has known vulnerabilities"
+
+    | Advisory | Severity | Fixed in |
+    | --- | --- | --- |
+    | [GHSA-g6cj-pr64-35w5](https://github.com/advisories/GHSA-g6cj-pr64-35w5): PKCS#7 decryption oracle | High | 50.0.0 |
+    | [GHSA-jwv3-5hgf-82ww](https://github.com/advisories/GHSA-jwv3-5hgf-82ww): X.509 path-building denial of service | High | 49.0.0 |
+    | [GHSA-m2h6-j472-rp4c](https://github.com/advisories/GHSA-m2h6-j472-rp4c): X.509 name-constraint bypass | Moderate | 49.0.0 |
+
+    canfar uses neither PKCS#7 nor X.509 path verification, and no unrelated
+    packages share the tool environment.
+
+If `sysctl -n machdep.cpu.brand_string` prints `Apple M…`, your Mac is Apple
+Silicon running an Intel Python under Rosetta. Use a native Python instead; it
+gets current releases.
+
+### Try this development branch
+
+To test the development examples on `main`, use a separate checkout and Python
+environment. With Git and `uv` installed, run:
+
+```bash
+git clone --branch main https://github.com/opencadc/canfar.git canfar-preview
+cd canfar-preview
+uv sync
+source .venv/bin/activate
+canfar --help
+canfar ps --help
+```
+
+The activation command above is for a macOS or Linux shell. In another shell,
+use `uv run canfar …` from the checkout instead. A development checkout can
+share the last release's version string. Read command help to verify each
+unreleased feature, such as [CLI extensions](../cli/extensions.md).
+
+The Python environment is separate, but the client still uses your normal
+`~/.canfar/config.yaml`. Review the [migration guide](migration.md) before
+changing saved configuration.
+
+<span id="log-in"></span>
+
+## Authenticate
+
+The simplest path is to authenticate with the CLI. Python then uses the saved
+Authentication Record and Server Selection:
+
+```bash
+canfar login cadc
+```
+
+Use `canfar login srcnet` if your account belongs to an SRCNet identity provider
+(IDP), the service that manages your login. It uses OpenID Connect (OIDC)
+device authorization: follow the displayed link to approve the login.
+
+<span id="use-async-workflows"></span>
+
+### Log in directly from Python
+
+The following alternatives perform the same OpenID Connect (OIDC) device
+login. Open the displayed verification URL and enter the user-facing code
+when prompted by your identity provider.
+
+=== "Sync Python"
+
+    ```python title="login.py"
+    import canfar
+
+    assert canfar.login("srcnet") is True
     ```
 
-### Using CANFAR Programmatically
+=== "Async Python"
 
-Once authenticated via CLI, you can use `canfar` in your Python code:
+    ```python title="login.py" hl_lines="5"
+    import asyncio
+    import canfar
+
+    async def main() -> None:
+        assert await canfar.alogin("srcnet") is True
+
+    if __name__ == "__main__":
+        asyncio.run(main())
+    ```
+
+In Jupyter, define `main()` without the script entrypoint and run
+`await main()` in another cell. The async login performs native asynchronous
+network requests.
+
+Python prints the verification URL, the user-facing device code, and
+`Waiting for approval.` It does not open a browser or render the CLI's QR code.
+The private OAuth device token is never printed.
+
+Both functions save the Authentication Record and discovered Science Platform
+Servers but do not change the active Authentication or Server Selection. They
+return `True` when that Identity Provider has a saved Authentication Record,
+including when an existing record is kept because `force` is false. A reused
+record prints `Already authenticated for '<idp>'.` A new login prints
+`Discovering servers for '<idp>'.` and then `Authenticated for '<idp>'.`
+An unknown Identity Provider raises `KeyError`, and credential or discovery
+failures raise `canfar.authentication.AuthenticationError`.
+
+### Select the identity and server in Python
+
+After either Python login function completes, select the saved identity and
+list its compatible servers:
 
 ```python
-from canfar.session import Session
-from canfar.images import Images
+from canfar import authentication, server
 
-# Uses your active authentication context
-session = Session()
-images = Images()
-
-# List available images
-container_images = images.fetch()
-print(f"Found {len(container_images)} container images")
-
-# Create a notebook session
-session_info = session.create(
-    kind="notebook",
-    image="images.canfar.net/skaha/astroml:latest",
-    name="my-analysis",
-    cores=2,
-    ram=4
-)
-print(f"Created session: {session_info.id}")
+authentication.use("srcnet")
+for candidate in server.list_servers():
+    print(candidate.name, candidate.url)
 ```
+
+Choose a name from that output, replace `SERVER_NAME` below, and select it
+before you construct a Session client:
+
+```python
+server.use("SERVER_NAME")
+```
+
+These selection functions are synchronous and save the defaults used by new
+clients. In a notebook or another running event loop, run selection and
+discovery in a worker thread because they can start their own event loop:
+
+```python
+import asyncio
+import canfar
+from canfar import authentication, server
+
+assert await canfar.alogin("srcnet") is True
+await asyncio.to_thread(authentication.use, "srcnet")
+candidates = await asyncio.to_thread(server.list_servers)
+for candidate in candidates:
+    print(candidate.name, candidate.url)
+```
+
+After choosing a name from that output, run this in the next notebook cell:
+
+```python
+await asyncio.to_thread(server.use, "SERVER_NAME")
+```
+
+The CLI `canfar login` flow includes selection, so you can use that route instead.
+
+!!! note "Storage and compute can use different accounts"
+
+    The default `arc` and `vault` services use your saved CADC Authentication
+    Record, even when compute uses SRCNet. Run `canfar login cadc` for those
+    services. Then select SRCNet again for compute with `canfar auth use srcnet`
+    and `canfar server use SERVER_NAME` if needed.
+
+<span id="use-fixed-resources"></span>
+
+## Create a Session
+
+```python
+from canfar.sessions import Session
+
+with Session() as session:
+    ids = session.create(
+        kind="notebook",
+        image="images.canfar.net/skaha/astroml:latest",
+        name="my-analysis",
+    )
+    print(ids)
+```
+
+Choose an image available on your selected server using `canfar image ls
+--kind notebook`; the image above is an example. Keep the returned IDs to
+inspect and clean up this specific run, as shown in the [Python tutorial](quick-start.md).
+
+`create()` returns `list[str]`. A failed replica is omitted and a total HTTP or
+network failure returns `[]`; request validation errors still raise.
+
+## Edit and save Configuration
+
+`Configuration` is the persisted data shape. Its top-level fields are
+`version`, `active`, `authentication`, `servers`, `registry`, and `console`.
+Authentication Records are keyed by Identity Provider, Science Platform Servers
+by Server Name, and `active` stores the selected references. Use the bound
+`config.editor` to read, validate, and save changes:
+
+```python
+from canfar.models.config import Configuration
+
+config = Configuration()
+width = config.editor.get("console.width")
+config.editor.set("console.width", 132)
+config.editor.save()
+```
+
+`get()` can return a scalar, mapping, or whole list through a dotted path. List
+indices are not supported. `set()` validates before mutating the bound model;
+invalid updates leave it unchanged. `save()` persists the validated
+Configuration atomically. The editor itself is not part of the serialized
+Configuration shape.
 
 ## Private Container Images
 
-To access private container images from registries like CANFAR Harbor, provide registry credentials:
+Pass a `ContainerRegistry` in the Configuration when creating a Session from a
+private image:
 
 ```python
-from canfar.models import ContainerRegistry
-from canfar.session import Session
+from canfar.models.config import Configuration
+from canfar.models.registry import ContainerRegistry
+from canfar.sessions import Session
 
-# Configure registry access
-registry = ContainerRegistry(
-    username="your-username",
-    password="**************"
+config = Configuration(
+    registry=ContainerRegistry(username="username", secret="CLI_SECRET")
 )
-
-# Use with session
-session = Session(registry=registry)
-
-# Now you can use private images
-session_info = session.create(
-    kind="notebook",
-    image="images.canfar.net/private/my-image:latest",
-    cores=1,
-    ram=2
-)
+with Session(config=config) as session:
+    ids = session.create(
+        kind="notebook",
+        image="images.canfar.net/my-project/private-image:latest",
+        name="private-image-test",
+    )
 ```
 
-!!! info "Registry Credentials"
-    The registry credentials are base64 encoded and passed to the server via the `X-Skaha-Registry-Auth` header.
+## Read next
 
-## Next Steps
-
-Now that you have `canfar` installed and configured:
-
-- [x] Try our [5-Minute Quick Start](quick-start.md) for a hands-on introduction to creating and managing sessions.
-- [x] Learn about [Authentication Contexts](../cli/authentication-contexts.md) for managing multiple servers and advanced authentication scenarios.
-- [x] Explore [Basic Examples](examples.md) and [Advanced Examples](advanced-examples.md) for common use cases.
-- [x] Check out the [Python API Reference](session.md) for detailed documentation of all available methods.
-- [x] Refer to the [FAQ](../platform/support/faq.md) for answers to common questions.
+- [Python quickstart](quick-start.md)
+- [Examples](examples.md)
+- [Data access](data.md)
+- [Authentication and Servers](../cli/authentication-contexts.md)
+- [Session API](session.md)

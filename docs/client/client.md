@@ -1,89 +1,160 @@
-#  HTTPClient
+<span id="features"></span>
 
-The `canfar.client` module provides a comprehensive HTTP client for interacting with CANFAR Science Platform services. Built on the powerful [`httpx`](https://www.python-httpx.org/) library, it offers both synchronous and asynchronous interfaces with advanced authentication capabilities.
+# HTTPClient
 
+`canfar.client.HTTPClient` is the lower-level transport used by the Session,
+Image, Context, and Overview clients. It composes native synchronous and
+asynchronous `httpx2` clients and is useful when an application needs a CANFAR
+request outside those higher-level modules.
 
-
-## Features
-
-!!! tip "Key Capabilities"
-    - **Multiple Authentication Methods**: X.509 certificates, OIDC tokens, and bearer tokens
-    - **Automatic SSL Configuration**: Seamless certificate-based authentication
-    - **Async/Sync Support**: Both synchronous and asynchronous HTTP clients
-    - **Connection Pooling**: Optimized for concurrent requests
-    - **Debug Logging**: Comprehensive logging for troubleshooting
-    - **Context Managers**: Proper resource management
-
-*This is a low-level client that is used by all other API clients in CANFAR. It is not intended to be used directly by users, but rather as a building block for other clients and contributors.*
-
-## Authentication Modes
-
-The client supports multiple authentication modes that can be configured through the authentication system:
-
-### Debug Logging
-
-```python
-import logging
-from canfar.client import HTTPClient
-
-# Enable debug logging to see client creation details
-client = HTTPClient(loglevel=logging.DEBUG)
-
-# This will log:
-# - Authentication mode selection
-# - SSL context creation
-# - Header generation
-# - Client configuration
-```
-
-## Configuration
-
-The client inherits from the `Configuration` class and supports all configuration options:
+## Construct a client
 
 ```python
 from canfar.client import HTTPClient
+from canfar.models.config import Configuration
 
 client = HTTPClient(
-    timeout=60,           # Request timeout in seconds
-    concurrency=64,       # Max concurrent connections
-    loglevel=20,         # Logging level (INFO)
+    config=Configuration(),
+    timeout=60,
+    concurrency=64,
 )
 ```
 
-## Authentication Expiry
+The main settings are:
 
-The client provides an `expiry` property that returns the expiry time for the current authentication method:
+- `url`: an explicit Science Platform Server URL.
+- `config`: the persisted `Configuration` to resolve by default.
+- `authentication_idp`: a transient Identity Provider selector for this client.
+- `token`: a runtime bearer token.
+- `certificate`: a runtime X.509 certificate path.
+- `timeout`: HTTP request inactivity timeout in seconds, from 1 to 300 with a
+  default of 30, not a total job deadline.
+- `concurrency`: maximum async connection count, from 1 to 128.
+- `transport`: an `httpx2` transport you own, to share one connection pool
+  across clients. This is a keyword argument only.
+
+Async requests wait for a free connection without a
+pool timeout. Connect, read, and write timeouts still use `timeout`, and
+`concurrency` still limits connections. Synchronous pool waits also use `timeout`.
+
+<span id="share-a-connection-pool"></span>
+
+### Share a connection pool
+
+A service that calls the Science Platform for many users can pass one
+`transport` to every client. Use an `httpx2.BaseTransport` for synchronous
+requests and an `httpx2.AsyncBaseTransport` for asynchronous ones; a mismatch
+raises `TypeError`. Closing a client leaves the transport open, so close it
+yourself when your service stops. Connection limits come from the transport,
+not `concurrency`; `timeout` still applies to each request.
 
 ```python
-import time
+import httpx2
 
-client = HTTPClient()
+from canfar.sessions import Session
 
-if client.expiry:
-    time_left = client.expiry - time.time()
-    print(f"Authentication expires in {time_left:.0f} seconds")
-else:
-    print("No expiry tracking (user-provided credentials)")
+transport = httpx2.HTTPTransport(limits=httpx2.Limits(max_connections=64))
+for token in user_tokens:
+    with Session(
+        token=token,
+        url="https://ws-uv.canfar.net/skaha/v1",
+        transport=transport,
+    ) as session:
+        print(session.fetch())
+transport.close()
 ```
 
-!!! note "Expiry Tracking"
-    The `expiry` property returns `None` for user-provided certificates or tokens since the client cannot track their expiry automatically.
+A transport works with bearer tokens only. Combining it with a runtime
+certificate or a saved X.509 Authentication Record raises `ValueError`, because
+`httpx2` would otherwise drop the client certificate. No environment variable
+sets the transport.
 
-## Error Handling
+When no explicit `url` is supplied, the active Server Selection in
+`Configuration` supplies the Science Platform Server. Without a runtime
+credential, `authentication_idp` selects a saved Authentication Record for this
+client; otherwise the active Authentication Record is used.
 
-The client includes built-in error handling for HTTP responses:
+<span id="authentication-modes"></span>
+<span id="authentication-expiry"></span>
+
+## Credential precedence and lifecycle
+
+Runtime credentials take precedence over saved Authentication Records. A
+non-empty runtime `token` wins over a saved X.509 or OIDC record; a runtime
+`certificate` likewise wins. An empty runtime token is treated as absent: a supplied runtime certificate
+still takes precedence, otherwise the client uses the selected saved record. Runtime credentials are not persisted.
+
+Without runtime credentials, the client resolves the selected saved record when
+its sync or async HTTPX2 client is first created. An expired OIDC record is
+refreshed through the saved Authentication Record and the refreshed token is
+persisted. If the record cannot refresh or an X.509 certificate is invalid,
+client construction/request setup raises the established authentication error
+instead of silently sending an unauthenticated request.
+
+Use the native context manager that matches the transport:
 
 ```python
-from httpx import HTTPStatusError
+from canfar.client import HTTPClient
 
-try:
-    response = client.client.get("/invalid-endpoint")
-    response.raise_for_status()
-except HTTPStatusError as e:
-    print(f"HTTP error: {e.response.status_code}")
+with HTTPClient(token="runtime-token", url="https://example.test/skaha/v1") as client:
+    response = client.client.get("context")
+
+
+async def request() -> None:
+    async with HTTPClient(
+        token="runtime-token",
+        url="https://example.test/skaha/v1",
+    ) as client:
+        response = await client.asynclient.get("context")
 ```
 
-## API Reference
+`client` is the native `httpx2.Client`; `asynclient` is the native
+`httpx2.AsyncClient`. They are created lazily and closed by their matching
+context manager. Do not use the async client from synchronous code or expect a
+sync client to run through an event loop.
+
+<span id="logging"></span>
+<span id="error-handling"></span>
+<span id="debug-logging"></span>
+
+## Errors and logging
+
+HTTP response hooks raise `httpx2.HTTPStatusError` by default for unsuccessful
+responses. Catch it at the application boundary when a request can fail:
+
+```python
+from httpx2 import HTTPStatusError
+
+from canfar.client import HTTPClient
+
+with HTTPClient(token="runtime-token", url="https://example.test/skaha/v1") as client:
+    try:
+        response = client.client.get("invalid-endpoint")
+    except HTTPStatusError as exc:
+        print(exc.response.status_code)
+```
+
+Authentication and configuration failures use CANFAR's authentication/error
+types. Do not log tokens, certificates, or raw credential records. Configure
+the application logger explicitly when diagnostics are needed:
+
+```python
+from canfar import configure_logging
+
+configure_logging("debug")
+```
+
+<span id="configuration"></span>
+
+## Configuration editing
+
+`HTTPClient` consumes the persisted `Configuration`; it does not own edits or
+alternate configuration services. Use `config.editor.get()`, `set()`, and
+`save()` to make validated, atomic changes while preserving the stable
+`version`/`active`/`authentication`/`servers`/`registry`/`console` shape. See
+[Install and set up](get-started.md#edit-and-save-configuration).
+
+## API reference
 
 ::: canfar.client.HTTPClient
     handler: python
@@ -91,6 +162,9 @@ except HTTPStatusError as e:
       members:
         - client
         - asynclient
+        - uses_runtime_credentials
+        - authentication_record
+        - build
       show_root_heading: true
       show_source: false
       heading_level: 3

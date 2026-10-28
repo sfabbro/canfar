@@ -2,38 +2,375 @@
 
 from __future__ import annotations
 
+import sys
+from dataclasses import dataclass, field
+from importlib import import_module
+from importlib.metadata import EntryPoint, entry_points
+from pathlib import Path  # noqa: TC003 - Typer resolves callback annotations at runtime
+from typing import TYPE_CHECKING, Annotated, Any
+
 import typer
+from pydantic import ValidationError
+from typer.core import TyperCommand, TyperGroup
+from typer.main import get_group
 
-from canfar.cli.auth import auth
-from canfar.cli.config import config
-from canfar.cli.create import create
-from canfar.cli.delete import delete
-from canfar.cli.events import events
-from canfar.cli.image import image
-from canfar.cli.info import info
-from canfar.cli.logs import logs
-from canfar.cli.open import open_command
-from canfar.cli.prune import prune
-from canfar.cli.ps import ps
-from canfar.cli.stats import stats
-from canfar.cli.version import version
+import canfar.models.config as config_model
+from canfar.cli import output
+from canfar.config.migration import ConfigResetRequiredError
 from canfar.exceptions.context import AuthContextError, AuthExpiredError
-from canfar.hooks.typer.aliases import AliasGroup
-from canfar.utils.console import console
+from canfar.utils.console import activate_cli_root, get_console
+from canfar.utils.logging import (
+    InvalidLogFilePathError,
+    InvalidLoggingEnvironmentError,
+    LoggingLevel,
+    configure_logging,
+)
+
+if TYPE_CHECKING:
+    from typer._click import HelpFormatter
+    from typer._click.core import Command
+    from typer._click.core import Context as ClickContext
+    from typer._click.shell_completion import CompletionItem
+
+    from canfar.errors import StructuredError
 
 
-def callback(ctx: typer.Context) -> None:
+_ROOT_CHILD_ARGS_META_KEY = "canfar.root_child_args"
+
+
+def _leaf_output_mode(args: list[str]) -> output.OutputMode:
+    """Infer a leaf output option before root setup has completed."""
+    for index, arg in enumerate(args):
+        if arg == "--":
+            break
+        if arg in {"-o", "--output"} and index + 1 < len(args):
+            value = args[index + 1]
+            if value in {"json", "yaml"}:
+                return output.OutputMode(value)
+        if arg.startswith("--output=") and arg.removeprefix("--output=") in {
+            "json",
+            "yaml",
+        }:
+            return output.OutputMode(arg.removeprefix("--output="))
+        if arg.startswith("-o") and arg not in {"-o", "--output"}:
+            value = arg.removeprefix("-o")
+            if value in {"json", "yaml"}:
+                return output.OutputMode(value)
+    return output.OutputMode.HUMAN
+
+
+class _RootTyperGroup(TyperGroup):
+    """Load root commands on demand and capture child argv for root setup.
+
+    A command's module loads for invocation or completion inside that command.
+    Root help and root completion use registered summaries without importing
+    command modules.
+    """
+
+    _listing = False
+
+    def parse_args(self, ctx: ClickContext, args: list[str]) -> list[str]:
+        """Record unconsumed child arguments without changing dispatch."""
+        child_args = super().parse_args(ctx, args)
+        if ctx.parent is None:
+            ctx.meta[_ROOT_CHILD_ARGS_META_KEY] = list(child_args)
+        return child_args
+
+    def list_commands(self, ctx: ClickContext) -> list[str]:
+        """List registered commands in registration order."""
+        names = [*_COMMANDS, *_plugin_commands(), *super().list_commands(ctx)]
+        return list(dict.fromkeys(names))
+
+    def get_command(self, ctx: ClickContext, cmd_name: str) -> Command | None:
+        """Return a command, importing its module the first time it is used."""
+        lazy = _COMMANDS.get(cmd_name)
+        if lazy is None and cmd_name not in self.commands:
+            lazy = _plugin_commands().get(cmd_name)
+        if lazy is not None and cmd_name not in self.commands:
+            if self._listing:
+                return lazy.summary(cmd_name)
+            self.add_command(lazy.load(cmd_name), cmd_name)
+        return super().get_command(ctx, cmd_name)
+
+    def format_help(self, ctx: ClickContext, formatter: HelpFormatter) -> None:
+        """Render root help from command summaries."""
+        self._listing = True
+        try:
+            super().format_help(ctx, formatter)
+        finally:
+            self._listing = False
+
+    def shell_complete(
+        self, ctx: ClickContext, incomplete: str
+    ) -> list[CompletionItem]:
+        """Complete root names from summaries without importing commands."""
+        self._listing = True
+        try:
+            return super().shell_complete(ctx, incomplete)
+        finally:
+            self._listing = False
+
+
+_LEAF_USAGE = {
+    "create": "Usage: canfar create [OPTIONS] KIND IMAGE [-- CMD [ARGS]...]",
+    "prune": "Usage: canfar prune [OPTIONS] PREFIX KIND STATUS COMMAND [ARGS]...",
+}
+
+
+class _LeafUsageCommand(TyperCommand):
+    """Keep root leaf usage text aligned with delimiter-bearing commands."""
+
+    def get_usage(self, ctx: ClickContext) -> str:
+        """Return the canonical usage line for a leaf with custom syntax."""
+        name = self.name or ""
+        if name in _LEAF_USAGE:
+            return _LEAF_USAGE[name]
+        return super().get_usage(ctx)
+
+
+class _CreateCommand(_LeafUsageCommand):
+    """Validate and describe resource options with the active Server's limits."""
+
+    def parse_args(self, ctx: ClickContext, args: list[str]) -> list[str]:
+        """Apply saved Server limits before parsing, help included."""
+        from canfar.cli.create import apply_server_limits  # noqa: PLC0415
+
+        apply_server_limits(self.params)
+        return super().parse_args(ctx, args)
+
+
+@dataclass(frozen=True)
+class _LazyCommand:
+    """A root command whose module is imported only when the command is used.
+
+    Attributes:
+        target: A builtin's ``module:attribute`` or a plugin entry point.
+        help: Short help, also shown in root help before the module loads.
+        panel: Root help panel that groups the command.
+        group: Whether ``target`` is a Typer application of subcommands.
+        options: Further ``Typer.command`` or ``Typer.add_typer`` settings.
+    """
+
+    target: str | EntryPoint
+    help: str
+    panel: str
+    group: bool = False
+    options: dict[str, Any] = field(default_factory=dict)
+
+    def summary(self, name: str) -> TyperCommand:
+        """Return a stand-in that lists the command without importing it."""
+        return TyperCommand(name, help=self.help, rich_help_panel=self.panel)
+
+    def load(self, name: str) -> Command:
+        """Import the command and build it as a root registration would."""
+        if isinstance(self.target, EntryPoint):
+            target = self.target.load()
+        else:
+            module, _, attribute = self.target.partition(":")
+            target = getattr(import_module(module), attribute)
+        host = typer.Typer(rich_markup_mode="rich")
+        settings: dict[str, Any] = {
+            "help": self.help,
+            "rich_help_panel": self.panel,
+            **self.options,
+        }
+        if self.group:
+            host.add_typer(target, name=name, **settings)
+        else:
+            host.command(name, **settings)(target)
+        return get_group(host).commands[name]
+
+
+_HELP_OPTIONS = {"help_option_names": ["-h", "--help"]}
+
+_COMMANDS: dict[str, _LazyCommand] = {
+    "login": _LazyCommand(
+        "canfar.cli.login:login_command",
+        "Login to CANFAR Science Platform.",
+        "Auth Management",
+    ),
+    "auth": _LazyCommand(
+        "canfar.cli.auth:auth",
+        "Manage authentication providers.",
+        "Auth Management",
+        group=True,
+        options={"no_args_is_help": False},
+    ),
+    "server": _LazyCommand(
+        "canfar.cli.server:server",
+        "Manage science platform servers.",
+        "Auth Management",
+        group=True,
+        options={"no_args_is_help": True},
+    ),
+    "data": _LazyCommand(
+        "canfar.cli.data:data",
+        "Operate on configured data sources. Beta.",
+        "Data Management",
+        group=True,
+    ),
+    "create": _LazyCommand(
+        "canfar.cli.create:creation",
+        "Launch a new session.",
+        "Session Management",
+        options={
+            "cls": _CreateCommand,
+            "context_settings": {**_HELP_OPTIONS, "allow_interspersed_args": True},
+            "no_args_is_help": True,
+        },
+    ),
+    "ps": _LazyCommand("canfar.cli.ps:show", "Show sessions.", "Session Management"),
+    "events": _LazyCommand(
+        "canfar.cli.events:get_events",
+        "List events for sessions.",
+        "Session Management",
+    ),
+    "info": _LazyCommand(
+        "canfar.cli.info:get_info", "Show session info", "Session Management"
+    ),
+    "open": _LazyCommand(
+        "canfar.cli.open:open_sessions",
+        "Open sessions in a browser",
+        "Session Management",
+        options={"context_settings": _HELP_OPTIONS, "no_args_is_help": True},
+    ),
+    "logs": _LazyCommand(
+        "canfar.cli.logs:get_logs", "Show session logs", "Session Management"
+    ),
+    "renew": _LazyCommand(
+        "canfar.cli.renew:renew_sessions",
+        "Renew sessions by ID.",
+        "Session Management",
+        options={"no_args_is_help": True},
+    ),
+    "delete": _LazyCommand(
+        "canfar.cli.delete:delete_sessions",
+        "Delete sessions by ID.",
+        "Session Management",
+        options={"no_args_is_help": True},
+    ),
+    "prune": _LazyCommand(
+        "canfar.cli.prune:prune_sessions",
+        "Delete sessions by criteria.",
+        "Session Management",
+        options={
+            "cls": _LeafUsageCommand,
+            "context_settings": _HELP_OPTIONS,
+            "no_args_is_help": True,
+        },
+    ),
+    "stats": _LazyCommand(
+        "canfar.cli.stats:get_stats", "Show cluster stats", "Cluster Information"
+    ),
+    "image": _LazyCommand(
+        "canfar.cli.image:image",
+        "Manage images",
+        "Image Management",
+        group=True,
+        options={"no_args_is_help": True},
+    ),
+    "config": _LazyCommand(
+        "canfar.cli.config:config",
+        "Manage client config",
+        "Client Info",
+        group=True,
+        options={"no_args_is_help": True},
+    ),
+    "version": _LazyCommand(
+        "canfar.cli.version:callback", "View client info", "Client Info"
+    ),
+    "feedback": _LazyCommand(
+        "canfar.cli.feedback:callback", "Find help and share feedback.", "Client Info"
+    ),
+}
+"""Root commands in help order, imported only when used."""
+
+
+def _plugin_summary(ep: EntryPoint) -> str:
+    """Short help from the plugin distribution, without importing its code."""
+    summary = ep.dist.metadata["Summary"] if ep.dist is not None else None
+    return summary or "Installed extension."
+
+
+def _plugin_commands() -> dict[str, _LazyCommand]:
+    """``canfar.commands`` entry points that do not replace a builtin.
+
+    Names and help come from distribution metadata. The plugin module is
+    imported for invocation or completion inside that command.
+    """
+    selected: dict[str, _LazyCommand] = {}
+    for ep in entry_points(group="canfar.commands"):
+        if ep.name in _COMMANDS or ep.name in selected or not ep.value:
+            continue
+        selected[ep.name] = _LazyCommand(
+            ep,
+            _plugin_summary(ep),
+            "Extensions",
+            group=True,
+        )
+    return selected
+
+
+def callback(
+    ctx: typer.Context,
+    log_level: Annotated[
+        LoggingLevel | None,
+        typer.Option(
+            "--log-level",
+            case_sensitive=False,
+            help="Set the logging level.",
+        ),
+    ] = None,
+    verbose: Annotated[
+        int,
+        typer.Option(
+            "-v",
+            count=True,
+            help="Show progress with -v, and debugging detail with -vv.",
+        ),
+    ] = 0,
+    log_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--log-file",
+            help="Write JSON Lines logs to this file.",
+        ),
+    ] = None,
+) -> None:
     """Main callback that handles no subcommand case."""
+    activate_cli_root(ctx)
+    child_args: list[str] = ctx.meta.get(_ROOT_CHILD_ARGS_META_KEY, [])
+    setup_mode = _leaf_output_mode(child_args)
+
+    def warning_writer(error: StructuredError) -> None:
+        if setup_mode is output.OutputMode.HUMAN:
+            typer.echo(f"{error.code}: {error.message}", err=True)
+        else:
+            output.to_stderr(error, setup_mode)
+
+    try:
+        configure_logging(
+            loglevel=log_level,
+            verbosity=verbose,
+            log_file=log_file,
+            warning_writer=warning_writer,
+        )
+    except (InvalidLoggingEnvironmentError, InvalidLogFilePathError) as err:
+        if setup_mode is output.OutputMode.HUMAN:
+            typer.echo(str(err), err=True)
+        else:
+            output.to_stderr(err.error, setup_mode)
+        raise typer.Exit(2) from err
+
     if ctx.invoked_subcommand is None:
-        # No subcommand was invoked, show help and exit cleanly
-        console.print(ctx.get_help())
+        get_console().print(ctx.get_help())
         raise typer.Exit(0)
 
 
 cli: typer.Typer = typer.Typer(
     name="canfar",
     help="CANFAR Science Platform",
-    no_args_is_help=False,  # Disable automatic help to handle manually
+    no_args_is_help=False,
     add_completion=True,
     pretty_exceptions_show_locals=True,
     pretty_exceptions_enable=True,
@@ -42,128 +379,40 @@ cli: typer.Typer = typer.Typer(
     rich_markup_mode="rich",
     rich_help_panel="CANFAR CLI Commands",
     callback=callback,
-    invoke_without_command=True,  # Allow callback to be called without subcommand
-    cls=AliasGroup,
-)
-
-cli.add_typer(
-    auth,
-    name="auth",
-    help="Authenticate with Science Platform",
-    no_args_is_help=True,
-    rich_help_panel="Auth Management",
-)
-
-cli.add_typer(
-    create,
-    no_args_is_help=True,
-    rich_help_panel="Session Management",
-)
-
-cli.add_typer(
-    ps,
-    no_args_is_help=False,
-    rich_help_panel="Session Management",
-)
-cli.add_typer(
-    events,
-    no_args_is_help=False,
-    rich_help_panel="Session Management",
-)
-
-cli.add_typer(
-    info,
-    help="Show session info",
-    no_args_is_help=False,
-    rich_help_panel="Session Management",
-)
-
-cli.add_typer(
-    open_command,
-    name="open",
-    help="Open sessions in a browser",
-    no_args_is_help=True,
-    rich_help_panel="Session Management",
-)
-
-cli.add_typer(
-    logs,
-    help="Show session logs",
-    no_args_is_help=False,
-    rich_help_panel="Session Management",
-)
-
-cli.add_typer(
-    delete,
-    no_args_is_help=True,
-    rich_help_panel="Session Management",
-)
-
-cli.add_typer(
-    prune,
-    no_args_is_help=True,
-    rich_help_panel="Session Management",
-)
-
-# Aliases
-
-cli.add_typer(
-    create,
-    name="run | launch",
-    help="Aliases for create.",
-    no_args_is_help=True,
-    rich_help_panel="Aliases",
-)
-
-cli.add_typer(
-    delete,
-    name="del",
-    help="Aliases for delete.",
-    no_args_is_help=True,
-    rich_help_panel="Aliases",
-)
-
-cli.add_typer(
-    stats,
-    help="Show cluster stats",
-    no_args_is_help=False,
-    rich_help_panel="Cluster Information",
-)
-
-cli.add_typer(
-    image,
-    name="image",
-    help="Manage images",
-    no_args_is_help=True,
-    rich_help_panel="Image Management",
-)
-
-
-cli.add_typer(
-    config,
-    name="config",
-    help="Manage client config",
-    no_args_is_help=True,
-    rich_help_panel="Client Info",
-)
-cli.add_typer(
-    version,
-    name="version",
-    help="View client info",
-    no_args_is_help=False,
-    rich_help_panel="Client Info",
+    invoke_without_command=True,
+    cls=_RootTyperGroup,
 )
 
 
 def main() -> None:
-    """Main entry point."""
+    """Main entry point.
+
+    Raises:
+        SystemExit: With status 1 when a command ends on a boundary error that
+            it did not render itself.
+    """
     try:
         cli()
-    except AuthExpiredError as err:
-        console.print(err)
-        console.print("Authenticate with [italic cyan] canfar auth login[/italic cyan]")
-    except AuthContextError as err:
-        console.print(err)
+    except Exception as err:
+        # The HTTP authentication hook is imported only by commands that use it.
+        from canfar.hooks.httpx.auth import AuthenticationError  # noqa: PLC0415
+
+        config_path = config_model.CONFIG_PATH
+        if (
+            isinstance(err, ValidationError)
+            and err.title == config_model.Configuration.model_config["title"]
+            and config_path.exists()
+        ):
+            err = ConfigResetRequiredError.from_validation(config_path, err)
+        boundary = (
+            AuthExpiredError,
+            AuthContextError,
+            ConfigResetRequiredError,
+            AuthenticationError,
+        )
+        if not isinstance(err, boundary):
+            raise
+        output.fail(output.boundary_failure(err), _leaf_output_mode(sys.argv[1:]))
 
 
 if __name__ == "__main__":

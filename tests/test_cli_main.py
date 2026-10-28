@@ -2,11 +2,71 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import sys
+from pathlib import Path
+from typing import TYPE_CHECKING
+from unittest.mock import patch
+
+import pytest
+import yaml
 from typer.testing import CliRunner
 
-from canfar.cli.main import cli
+from canfar.cli.main import cli, main
+from canfar.config.migration import ConfigResetRequiredError
+from canfar.exceptions.context import (
+    AuthContextError,
+    AuthExpiredError,
+    AuthRequiredError,
+)
+from canfar.hooks.httpx.auth import AuthenticationError
+from canfar.utils.console import get_console
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 runner = CliRunner()
+
+_LOG_MESSAGES = {
+    logging.DEBUG: "logging-contract-debug",
+    logging.INFO: "logging-contract-info",
+    logging.WARNING: "logging-contract-warning",
+    logging.ERROR: "logging-contract-error",
+    logging.CRITICAL: "logging-contract-critical",
+}
+
+
+@cli.command("logging-contract-probe", hidden=True)
+def _logging_contract_probe() -> None:
+    """Emit one message at each supported level through the public CLI runtime."""
+    logger = logging.getLogger("canfar.contract")
+    for level, message in _LOG_MESSAGES.items():
+        logger.log(level, message)
+
+
+def _write_null_active_server_config(path: Path) -> None:
+    data = {
+        "version": 2,
+        "active": {"authentication": "cadc", "server": None},
+        "authentication": {
+            "cadc": {
+                "mode": "x509",
+                "path": "/saved/cadc.pem",
+                "expiry": 123.0,
+            }
+        },
+        "servers": {
+            "CADC-CANFAR": {
+                "idp": "cadc",
+                "uri": "ivo://cadc.nrc.ca/skaha",
+                "url": "https://ws-uv.canfar.net/skaha",
+                "version": "v1",
+                "auths": ["x509"],
+            }
+        },
+    }
+    path.write_text(yaml.dump(data), encoding="utf-8")
 
 
 def test_main_cli_no_subcommand() -> None:
@@ -19,3 +79,311 @@ def test_main_cli_with_help_option() -> None:
     """Test main CLI entrypoint with --help option."""
     result = runner.invoke(cli, ["--help"])
     assert result.exit_code == 0
+
+
+def test_nested_help_does_not_emit_banner() -> None:
+    """Nested help remains free of command output decoration."""
+    result = runner.invoke(cli, ["config", "--help"])
+
+    assert result.exit_code == 0
+    assert not result.stdout.startswith("@")
+
+
+def test_short_nested_help_does_not_emit_banner() -> None:
+    """Nested short help remains free of command output decoration."""
+    result = runner.invoke(cli, ["create", "-h"])
+
+    assert result.exit_code == 0
+    assert not result.stdout.startswith("@")
+
+
+def test_implicit_nested_help_does_not_emit_banner() -> None:
+    """Bare nested groups keep implicit help free of command output."""
+    result = runner.invoke(cli, ["config"])
+
+    assert result.exit_code == 2
+    assert not result.stdout.startswith("@")
+
+
+def test_human_cli_runs_when_active_server_is_null(tmp_path: Path) -> None:
+    """Human-mode CLI remains usable when no active server is selected."""
+    config_path = tmp_path / "config.yaml"
+    _write_null_active_server_config(config_path)
+
+    with patch("canfar.models.config.CONFIG_PATH", config_path):
+        result = runner.invoke(cli, ["auth", "ls"])
+
+    assert result.exit_code == 0
+    assert result.stdout.startswith("@unknown")
+
+
+def test_version_debug_retains_bug_report_diagnostics() -> None:
+    """The domain-specific version flag remains separate from root logging."""
+    result = runner.invoke(cli, ["version", "--debug"])
+
+    assert result.exit_code == 0, result.output
+    assert "CANFAR Python Client Debug Information" in result.output
+    assert "Python Version" in result.output
+
+
+@pytest.mark.parametrize(
+    ("root_options", "env_level", "minimum_level"),
+    [
+        ([], None, logging.CRITICAL),
+        (["-v"], None, logging.INFO),
+        (["-vv"], None, logging.DEBUG),
+        (["-vvv"], None, logging.DEBUG),
+        ([], "info", logging.INFO),
+        (["-v"], "chatty", logging.INFO),
+        (["--log-level", "warning", "-vvvv"], "chatty", logging.WARNING),
+    ],
+)
+def test_root_logging_controls_emit_only_the_effective_levels(
+    root_options: list[str],
+    env_level: str | None,
+    minimum_level: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Root controls apply CLI, environment, and packaged-default precedence."""
+    if env_level is None:
+        monkeypatch.delenv("CANFAR_LOGLEVEL", raising=False)
+    else:
+        monkeypatch.setenv("CANFAR_LOGLEVEL", env_level)
+
+    result = runner.invoke(cli, [*root_options, "logging-contract-probe"])
+
+    assert result.exit_code == 0, result.output
+    for level, message in _LOG_MESSAGES.items():
+        assert result.stdout.count(message) == 0
+        assert result.stderr.count(message) == int(level >= minimum_level)
+
+
+def test_invalid_logging_environment_fails_with_actionable_details(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An invalid known logging value fails before command execution."""
+    monkeypatch.setenv("CANFAR_LOGLEVEL", "chatty")
+
+    result = runner.invoke(cli, ["logging-contract-probe"])
+
+    assert result.exit_code != 0
+    assert "logging.invalid_env_value" in result.output
+    assert "env_var=CANFAR_LOGLEVEL" in result.output
+    assert "provided_value=chatty" in result.output
+    assert "expected=critical,error,warning,info,debug" in result.output
+
+
+def test_main_without_login_fails_as_not_authenticated(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A human-text command with no saved credential names the fix and exits 1."""
+    monkeypatch.setattr(sys, "argv", ["canfar", "image", "ls"])
+
+    with pytest.raises(SystemExit) as stopped:
+        main()
+
+    assert stopped.value.code == 1
+    captured = capsys.readouterr()
+    assert "Not authenticated" in captured.err
+    assert "canfar login" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_ps_machine_output_without_login_reports_authentication_required(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Machine mode reports the same condition with its stable error code."""
+    monkeypatch.setattr(sys, "argv", ["canfar", "ps", "-o", "json"])
+
+    with pytest.raises(SystemExit) as stopped:
+        main()
+
+    assert stopped.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert json.loads(captured.err)["code"] == "authentication.required"
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (AuthContextError("cadc", "X.509 certificate cannot be used."), "invalid"),
+        (AuthExpiredError("cadc", "certificate expired"), "canfar login cadc"),
+        (AuthenticationError("Failed to refresh OIDC token"), "Retry the command"),
+        (
+            ConfigResetRequiredError(Path("/home/me/.canfar/config.yaml"), []),
+            "CANFAR config error",
+        ),
+    ],
+)
+def test_main_exits_nonzero_for_boundary_errors(
+    error: Exception,
+    expected: str,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Every handled boundary error is printed to stderr and exits 1 cleanly."""
+    with (
+        patch("canfar.cli.main.cli", side_effect=error),
+        pytest.raises(SystemExit) as stopped,
+    ):
+        main()
+
+    assert stopped.value.code == 1
+    captured = capsys.readouterr()
+    assert expected in captured.err
+    assert captured.out == ""
+
+
+@pytest.fixture
+def unreadable_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Iterator[Path]:
+    """Point the client at a config file and build consoles without cached state."""
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr("canfar.models.config.CONFIG_PATH", config_path)
+    monkeypatch.setenv("COLUMNS", "500")
+    get_console.cache_clear()
+    yield config_path
+    get_console.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("content", "problem"),
+    [
+        (
+            "version: 1\nfuture_key: true\n",
+            "future_key = True (Extra inputs are not permitted)",
+        ),
+        ("version: 99\n", "version = 99 (expected 2)"),
+        ("version: [1\n", "invalid YAML: while parsing a flow sequence"),
+    ],
+    ids=["unknown-field", "unsupported-version", "malformed-yaml"],
+)
+def test_main_reports_unreadable_config_without_traceback(
+    content: str,
+    problem: str,
+    unreadable_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A config file this client cannot read names the problem and the reset."""
+    unreadable_config.write_text(content, encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["canfar", "version"])
+
+    with pytest.raises(SystemExit) as stopped:
+        main()
+
+    assert stopped.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "CANFAR config error:" in captured.err
+    assert problem in captured.err
+    assert f"`rm {unreadable_config}`" in captured.err
+    assert "canfar login" in captured.err
+    assert "Traceback" not in captured.err
+    assert "ValidationError" not in captured.err
+
+
+def test_main_hides_credential_values_in_config_errors(
+    unreadable_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Invalid fields in credential sections print their key, never their value."""
+    unreadable_config.write_text(
+        "version: 1\nregistry:\n  username: me\n  secret: [hunter2]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys, "argv", ["canfar", "version"])
+
+    with pytest.raises(SystemExit):
+        main()
+
+    err = capsys.readouterr().err
+    assert "registry.secret = <hidden>" in err
+    assert "hunter2" not in err
+
+
+def test_main_reports_unreadable_config_as_structured_error(
+    unreadable_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Machine output keeps stdout empty and names the reset command."""
+    unreadable_config.write_text("version: 1\nfuture_key: true\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["canfar", "ps", "-o", "json"])
+
+    with pytest.raises(SystemExit) as stopped:
+        main()
+
+    assert stopped.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    error = json.loads(captured.err)
+    assert error["code"] == "config.invalid"
+    assert "future_key = True" in error["message"]
+    assert f"rm {unreadable_config}" in error["hint"]
+
+
+def test_main_keeps_machine_errors_structured(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An unrendered boundary error in machine mode stays parseable on stderr."""
+    monkeypatch.setattr(sys, "argv", ["canfar", "server", "ls", "-o", "json"])
+    error = AuthExpiredError("cadc", "certificate expired")
+
+    with patch("canfar.cli.main.cli", side_effect=error), pytest.raises(SystemExit):
+        main()
+
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "authentication.expired"
+    assert "canfar login cadc" in payload["hint"]
+
+
+@pytest.mark.parametrize("machine", [False, True], ids=["human", "json"])
+@pytest.mark.parametrize(
+    ("arguments", "operation"),
+    [
+        (["ps"], "canfar.cli.ps._fetch_sessions"),
+        (
+            ["create", "headless", "skaha/worker:v1"],
+            "canfar.cli.create._create_sessions",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    ("error", "code", "hint"),
+    [
+        (
+            AuthExpiredError("cadc", "X.509 certificate expired."),
+            "authentication.expired",
+            "canfar login cadc",
+        ),
+        (
+            AuthRequiredError("srcnet", "OIDC client secret expired."),
+            "authentication.required",
+            "canfar login srcnet",
+        ),
+        (
+            AuthenticationError("Failed to refresh OIDC token"),
+            "transport.failure",
+            "Retry the command",
+        ),
+    ],
+)
+def test_session_commands_show_authentication_recovery(
+    *, machine, arguments, operation, error, code, hint
+) -> None:
+    """Leaf error handlers retain the same recovery guidance as the entrypoint."""
+    with patch(operation, side_effect=error):
+        result = runner.invoke(cli, [*arguments, *(["-o", "json"] if machine else [])])
+
+    assert result.exit_code == 1
+    assert hint in result.stderr
+    assert "Traceback" not in result.stderr
+    if machine:
+        assert result.stdout == ""
+        assert json.loads(result.stderr)["code"] == code

@@ -8,18 +8,10 @@ from typing import Annotated
 import typer
 from rich.prompt import Confirm
 
-from canfar.hooks.typer.aliases import AliasGroup
 from canfar.sessions import AsyncSession
-from canfar.utils.console import console
-
-delete = typer.Typer(
-    name="delete",
-    no_args_is_help=True,
-    cls=AliasGroup,
-)
+from canfar.utils.console import emit_cli_active_server_banner, get_console
 
 
-@delete.callback(invoke_without_command=True)
 def delete_sessions(
     session_ids: Annotated[
         list[str],
@@ -33,13 +25,6 @@ def delete_sessions(
             help="Force deletion without confirmation.",
         ),
     ] = False,
-    debug: Annotated[
-        bool,
-        typer.Option(
-            "--debug",
-            help="Enable debug logging.",
-        ),
-    ] = False,
 ) -> None:
     """Delete sessions by ID.
 
@@ -47,25 +32,29 @@ def delete_sessions(
     canfar delete abc123
     canfar delete abc123 def456
     """
+    emit_cli_active_server_banner()
     if force:
         proceed: bool = True
     else:
         proceed = Confirm.ask(
             f"Confirm deletion of {len(session_ids)} session(s)?",
-            console=console,
+            console=get_console(),
             default=False,
         )
 
     async def _delete() -> None:
-        async with AsyncSession(loglevel="DEBUG" if debug else "INFO") as session:
+        """Delete the requested sessions from the science platform server."""
+        async with AsyncSession(errors="ignore") as session:
             try:
                 deleted = await session.destroy(ids=session_ids)
-                console.print(
+                get_console().print(
                     f"[bold green]Successfully deleted {deleted} "
                     f"session(s).[/bold green]"
                 )
             except Exception as err:  # noqa: BLE001
-                console.print(f"[bold red]Error during deletion: {err}[/bold red]")
+                get_console(stderr=True).print(
+                    f"[bold red]Error during deletion: {err}[/bold red]"
+                )
 
     if proceed:
         asyncio.run(_delete())

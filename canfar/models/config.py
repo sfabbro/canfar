@@ -1,9 +1,12 @@
-"""CANFAR Client Configuration - V2."""
+"""CANFAR client configuration models."""
 
 from __future__ import annotations
 
+import copy
+import re
+import sys
 from pathlib import Path
-from typing import Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 import yaml
 from pydantic import (
@@ -15,95 +18,66 @@ from pydantic import (
     ValidationError,
     model_validator,
 )
+
+if TYPE_CHECKING:
+    from pydantic.fields import FieldInfo
+    from pydantic_settings.sources.types import Traversable
+
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
     YamlConfigSettingsSource,
 )
+from pydantic_settings.sources import EnvSettingsSource
 
-from canfar import CONFIG_PATH, get_logger
-from canfar.models.auth import OIDC, X509
-from canfar.models.http import Server
+from canfar import CONFIG_PATH
+from canfar.config.editor import ConfigurationEditor as _ConfigurationEditor
+from canfar.config.migration import ConfigResetRequiredError, schema_version, upgrade
+from canfar.models.active import ActiveConfig
+from canfar.models.auth import (
+    AuthenticationCredential,
+    X509Credential,
+)
+from canfar.models.http import Server, VOSpaceService
 from canfar.models.registry import ContainerRegistry
 
-log = get_logger(__name__)
+_CADC_URI = AnyUrl("ivo://cadc.nrc.ca/skaha")
+_CONFIG_KEY_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+_SERVER_NAME_PATTERN = _CONFIG_KEY_PATTERN
 
-AuthContext = Annotated[OIDC | X509, Field(discriminator="mode")]
-"""A discriminated union of all supported authentication contexts."""
+default_active = ActiveConfig(
+    authentication="cadc",
+    server="canfar",
+)
 
-# Default authentication context
-# This is value that will be used if no configuration file is found
-default: dict[str, AuthContext] = {
-    "default": X509(
+default_authentication: dict[str, AuthenticationCredential] = {
+    "cadc": X509Credential(
+        idp="cadc",
         path=Path.home() / ".ssl" / "cadcproxy.pem",
         expiry=0.0,
-        server=Server(
-            name="CADC-CANFAR",
-            uri=AnyUrl("ivo://cadc.nrc.ca/skaha"),
-            url=AnyHttpUrl("https://ws-uv.canfar.net/skaha"),
-            version="v1",
-            auths=["x509"],
-        ),
-    )
+    ),
 }
 
-
-def _parse_dotted_path(path: str) -> list[str | int]:
-    segments: list[str | int] = []
-    for raw in path.split("."):
-        if not raw:
-            msg = f"Invalid path {path!r}: empty segment"
-            raise ValueError(msg)
-        segments.append(int(raw) if raw.isdigit() else raw)
-    return segments
-
-
-def _get_from_container(container: Any, key: str | int) -> Any:
-    if isinstance(key, int):
-        if not isinstance(container, list):
-            msg = f"Expected list for index {key}"
-            raise TypeError(msg)
-        return container[key]
-
-    if isinstance(container, BaseModel):
-        return getattr(container, key)
-
-    if isinstance(container, dict):
-        return container[key]
-
-    msg = f"Expected mapping or model for key {key!r}"
-    raise TypeError(msg)
-
-
-def _set_in_container(container: Any, key: str | int, value: Any) -> None:
-    if isinstance(key, int):
-        if not isinstance(container, list):
-            msg = f"Expected list for index {key}"
-            raise TypeError(msg)
-        container[key] = value
-        return
-
-    if isinstance(container, dict):
-        container[key] = value
-        return
-
-    msg = f"Expected mapping for key {key!r}"
-    raise TypeError(msg)
-
-
-def _ensure_child_container(parent: Any, key: str | int) -> Any:
-    if isinstance(key, int):
-        msg = "List indices are not supported for intermediate path segments"
-        raise TypeError(msg)
-
-    if not isinstance(parent, dict):
-        msg = f"Expected mapping for key {key!r}"
-        raise TypeError(msg)
-
-    if key not in parent or parent[key] is None:
-        parent[key] = {}
-    return parent[key]
+default_servers: dict[str, Server] = {
+    "canfar": Server(
+        idp="cadc",
+        uri=_CADC_URI,
+        url=AnyHttpUrl("https://ws-uv.canfar.net/skaha"),
+        version="v1",
+        auths=["x509"],
+        storage={
+            "arc": VOSpaceService(
+                uri=AnyUrl("ivo://cadc.nrc.ca/arc"),
+                url=AnyHttpUrl("https://ws-uv.canfar.net/arc"),
+            ),
+            "vault": VOSpaceService(
+                uri=AnyUrl("ivo://cadc.nrc.ca/vault"),
+                url=AnyHttpUrl("https://cadc-west-01.canfar.net/vault"),
+            ),
+        },
+    ),
+}
 
 
 class ConsoleConfig(BaseModel):
@@ -121,23 +95,18 @@ class ConsoleConfig(BaseModel):
         description="Width of the console output.",
         ge=1,
     )
-    file: Path | None = Field(
-        default=None,
-        title="Console File",
-        description="File to write console output to. Defaults to stdout.",
+    banner: bool = Field(
+        default=True,
+        title="Console Banner",
+        description="Show the active Server Selection in human CLI output.",
     )
 
 
 class Configuration(BaseSettings):
     """Unified configuration settings for CANFAR client and authentication.
 
-    This model manages all persistent configurations for the canfar client,
-    including multiple authentication contexts and container registry settings.
-    It loads settings from a YAML file, environment variables, and finally,
-    defaults defined in the models.
-
-    The structure is designed to support multiple, named server contexts,
-    allowing users to easily switch between them.
+    Current configuration separates authentication credentials from science
+    platform servers. Active selection references an IDP key and Server Name.
     """
 
     model_config = SettingsConfigDict(
@@ -151,15 +120,29 @@ class Configuration(BaseSettings):
         str_strip_whitespace=True,
     )
 
-    active: str = Field(
-        default="default",
-        title="Active Authentication Context",
-        description="The name of the context to use for authentication.",
+    version: Literal[2] = Field(
+        default=2,
+        description="Configuration schema version.",
     )
-    contexts: dict[str, AuthContext] = Field(
-        default_factory=lambda: default,
-        description="A key-value mapping of available authentication contexts.",
+    # Pydantic deep-copies these mutable defaults for each instance.
+    active: ActiveConfig = Field(
+        default=default_active,
+        description="Active authentication and server selection.",
     )
+    authentication: Annotated[
+        dict[str, AuthenticationCredential],
+        Field(
+            default=default_authentication,
+            description="Saved authentication credentials keyed by IDP.",
+        ),
+    ]
+    servers: Annotated[
+        dict[str, Server],
+        Field(
+            default=default_servers,
+            description="Known science platform servers keyed by Server Name.",
+        ),
+    ]
     registry: ContainerRegistry = Field(
         default_factory=ContainerRegistry,
         description="Container Registry Settings.",
@@ -174,90 +157,202 @@ class Configuration(BaseSettings):
         cls,
         settings_cls: type[BaseSettings],
         init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,  # noqa: ARG003
         dotenv_settings: PydanticBaseSettingsSource,  # noqa: ARG003
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Customize settings sources to automatically load from YAML config file.
 
         Args:
-            settings_cls (type[BaseSettings]): The settings class being configured.
-            init_settings (PydanticBaseSettingsSource): Settings from init arguments.
-            env_settings (PydanticBaseSettingsSource): Settings from env variables.
-            dotenv_settings (PydanticBaseSettingsSource): Settings from .env files.
-            file_secret_settings (PydanticBaseSettingsSource): Settings from secrets.
-
-        Note: The order of sources determines priority, with earlier sources taking
-        precedence.
+            settings_cls: The settings class being configured.
+            init_settings: Settings from init arguments.
+            env_settings: Settings from env variables.
+            dotenv_settings: Settings from .env files.
+            file_secret_settings: Settings from secrets.
 
         Returns:
-            tuple[PydanticBaseSettingsSource, ...]: A tuple of settings sources.
+            A tuple of settings sources ordered by precedence.
         """
         return (
             init_settings,
-            env_settings,
-            YamlConfigSettingsSource(settings_cls, yaml_file=CONFIG_PATH),
+            _CanfarEnvSettingsSource(settings_cls),
+            _CheckedYamlConfigSettingsSource(settings_cls, yaml_file=CONFIG_PATH),
             file_secret_settings,
         )
 
-    @model_validator(mode="after")
-    def _validate_contexts(self) -> Configuration:
-        """Validate the integrity of the authentication contexts.
+    @classmethod
+    def from_document(cls, data: dict[str, Any]) -> Configuration:
+        """Validate ``data`` alone, without environment or file settings.
 
-        Note: This validation does not check the validity of the credentials
-        within each context, only the integrity of the context structure.
-
-        Raises:
-            ValueError: If the configuration is invalid.
+        Args:
+            data: Complete configuration document, changed in place.
 
         Returns:
-            Configuration: The validated configuration.
+            The validated configuration.
         """
-        if self.active not in self.contexts:
-            msg = f"Active context '{self.active}' not found in available contexts."
-            raise ValueError(msg)
+        config = cls.model_construct()
+        cls.__pydantic_validator__.validate_python(data, self_instance=config)
+        return config
+
+    @model_validator(mode="after")
+    def _normalize_and_validate_servers(self) -> Configuration:
+        """Inject Server Names and validate Server and Storage Identifier keys."""
+        updated: dict[str, Server] = {}
+        server_by_identifier: dict[str, str] = {}
+        for name, server in self.servers.items():
+            if not _SERVER_NAME_PATTERN.match(name):
+                msg = (
+                    f"Invalid server name '{name}': must match "
+                    r"^[A-Za-z][A-Za-z0-9_-]*$"
+                )
+                raise ValueError(msg)
+            for identifier in server.storage:
+                if previous_server_name := server_by_identifier.get(identifier):
+                    msg = (
+                        f"Duplicate Storage Identifier '{identifier}' in "
+                        "Science Platform "
+                        f"Servers '{previous_server_name}' and '{name}'."
+                    )
+                    raise ValueError(msg)
+                server_by_identifier[identifier] = name
+            updated[name] = server.model_copy(update={"name": name}, deep=True)
+        self.servers = updated
         return self
 
-    def save(self) -> None:
-        """Save the current configuration to the default YAML file."""
-        CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            # Use `model_dump` which is the Pydantic v2 equivalent of `dict`
-            data = self.model_dump(mode="json", exclude_none=True)
-            with CONFIG_PATH.open(mode="w", encoding="utf-8") as f:
-                yaml.dump(data, f, default_flow_style=False, sort_keys=True, indent=2)
-        except (OSError, TypeError, ValidationError) as e:
-            msg = f"Failed to save configuration to {CONFIG_PATH}: {e}"
-            raise OSError(msg) from e
+    @model_validator(mode="before")
+    @classmethod
+    def _seed_credential_idps(cls, data: Any) -> Any:
+        """Seed required credential ``idp`` fields from dict keys before parsing."""
+        if isinstance(data, dict):
+            authentication = data.get("authentication")
+            if isinstance(authentication, dict):
+                for idp, credential in authentication.items():
+                    if isinstance(credential, dict):
+                        credential.setdefault("idp", idp)
+        return data
 
-    @property
-    def context(self) -> AuthContext:
-        """Get the active authentication context.
+    @model_validator(mode="after")
+    def _inject_credential_idps(self) -> Configuration:
+        """Inject dict keys into each credential and validate IDP keys."""
+        updated: dict[str, AuthenticationCredential] = {}
+        for idp, credential in self.authentication.items():
+            if not _CONFIG_KEY_PATTERN.match(idp):
+                msg = (
+                    f"Invalid IDP key '{idp}': must match "
+                    r"^[A-Za-z][A-Za-z0-9_-]*$"
+                )
+                raise ValueError(msg)
+            updated[idp] = credential.model_copy(update={"idp": idp}, deep=True)
+        self.authentication = updated
+        return self
+
+    @model_validator(mode="after")
+    def _validate_active_references(self) -> Configuration:
+        """Validate active authentication and server exist in saved lists.
+
+        Raises:
+            ValueError: If active references are missing from saved records.
 
         Returns:
-            AuthContext: The active authentication context.
+            The validated configuration.
         """
-        return self.contexts[self.active]
-
-    def get_value(self, path: str) -> Any:
-        """Get a nested configuration value via dotted path (e.g. 'console.width')."""
-        value: Any = self
-        for segment in _parse_dotted_path(path):
-            value = _get_from_container(value, segment)
-        return value
-
-    def set_value(self, path: str, value: Any) -> Configuration:
-        """Return a new validated Configuration with a dotted-path value updated."""
-        segments = _parse_dotted_path(path)
-        if not segments:
-            msg = "Path cannot be empty"
+        auth_idps = set(self.authentication)
+        if self.active.authentication not in auth_idps:
+            msg = (
+                f"Active authentication '{self.active.authentication}' "
+                "not found in authentication list."
+            )
             raise ValueError(msg)
 
-        data = self.model_dump(mode="python")
-        cursor: Any = data
+        if self.active.server is not None and self.active.server not in self.servers:
+            msg = f"Active server '{self.active.server}' not found in servers mapping."
+            raise ValueError(msg)
 
-        for segment in segments[:-1]:
-            cursor = _ensure_child_container(cursor, segment)
+        for idp, name in self.active.servers.items():
+            if idp not in auth_idps:
+                msg = (
+                    f"Remembered server authentication '{idp}' "
+                    "not found in authentication list."
+                )
+                raise ValueError(msg)
+            try:
+                server = self.servers[name]
+            except KeyError as exc:
+                msg = f"Remembered server '{name}' not found in servers mapping."
+                raise ValueError(msg) from exc
+            if server.idp != idp:
+                msg = f"Remembered server '{name}' does not belong to IDP '{idp}'."
+                raise ValueError(msg)
 
-        _set_in_container(cursor, segments[-1], value)
-        return self.__class__.model_validate(data)
+        return self
+
+    @property
+    def editor(self) -> _ConfigurationEditor:
+        """Return the bound editing and persistence boundary."""
+        return _ConfigurationEditor(self)
+
+
+__all__ = ["CONFIG_PATH", "Configuration", "ConsoleConfig"]
+
+
+class _CanfarEnvSettingsSource(EnvSettingsSource):
+    """Environment source that ignores legacy ``CANFAR_ACTIVE`` string overrides."""
+
+    def get_field_value(
+        self, field: FieldInfo, field_name: str
+    ) -> tuple[Any, str, bool]:
+        env_val, field_key, value_is_complex = super().get_field_value(
+            field, field_name
+        )
+        if (
+            field_name == "active"
+            and isinstance(env_val, str)
+            and not env_val.lstrip().startswith(("{", "["))
+        ):
+            return None, field_key, value_is_complex
+        return env_val, field_key, value_is_complex
+
+
+class _CheckedYamlConfigSettingsSource(YamlConfigSettingsSource):
+    """YAML settings source that upgrades an older written schema once.
+
+    Only this source sees the file without environment or init overrides, so
+    an upgraded file is written here rather than in a model validator.
+    """
+
+    def __init__(
+        self,
+        settings_cls: type[BaseSettings],
+        *,
+        yaml_file: Path,
+    ) -> None:
+        self._config_path = yaml_file
+        super().__init__(settings_cls, yaml_file=yaml_file)
+
+    def _read_file(self, file_path: Path | Traversable) -> dict[str, Any]:
+        """Read the file at the current schema version, rewriting an older one."""
+        try:
+            data = super()._read_file(file_path)
+        except yaml.YAMLError as err:
+            problem = f"invalid YAML: {' '.join(str(err).split())}"
+            raise ConfigResetRequiredError(self._config_path, [problem]) from err
+
+        current = Configuration.model_fields["version"].default
+        version = schema_version(self._config_path, data, current)
+        if version == current:
+            data["version"] = current
+            return data
+
+        defaults = Configuration.model_construct().model_dump(
+            mode="json", exclude_none=True
+        )
+        data = upgrade(data, version, defaults)
+        try:
+            config = Configuration.from_document(copy.deepcopy(data))
+        except ValidationError as exc:
+            raise ConfigResetRequiredError.from_validation(
+                self._config_path, exc
+            ) from exc
+        config.editor.save()
+        sys.stderr.write(f"Migrating canfar client config v{version} → v{current}\n")
+        return data

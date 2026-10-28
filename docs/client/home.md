@@ -1,80 +1,110 @@
-# CANFAR Clients
+# Python client
 
-A powerful Python API and CLI for the CANFAR Science Platform.
+The CANFAR Python client provides authenticated access to Sessions, Container
+Images, VOSpace Services, and Science Platform metadata.
 
-=== ":fontawesome-solid-wand-magic-sparkles: Client"
+## Install and authenticate
 
-    !!! example ":material-language-python: API"
+[Install the client](get-started.md#install) first. These examples use v1.5.2;
+unreleased additions are marked separately in [What's new](updates.md).
 
-        === "`sync`"
+```bash
+canfar login cadc
+```
 
-            ```python
-            from canfar.sessions import Session
+The CLI stores the Authentication Record and Server Selection used by default
+by Python clients. Python OIDC login is also available as `canfar.login()` and
+`canfar.alogin()`; see [Install and set up](get-started.md).
 
-            session = Session()
-            ids = session.create(
-                name="test",
-                image="images.canfar.net/skaha/astroml:latest",
-                kind="headless",
-                cmd="env",
-                env={"KEY": "VALUE"},
-                replicas=3,
-            )
-            print(ids)
-            ```
+## Core workflows
 
-        === "`async`"
+<div class="grid cards" markdown>
 
-            ```python
-            from canfar.sessions import AsyncSession
-            
-            session = AsyncSession()
-            ids = await session.create(
-                name="test",
-                image="images.canfar.net/skaha/astroml:latest",
-                kind="headless",
-                cmd="env",
-                env={"KEY": "VALUE"},
-                replicas=3,
-            )
-            print(ids)
-            ```
-        
-        === "`async context`"
+-   **Create Sessions**
 
-            ```python
-            from canfar.sessions import AsyncSession
-            
-            async with AsyncSession() as session:
-                ids = await session.create(
-                    name="test",
-                    image="images.canfar.net/skaha/astroml:latest",
-                    kind="headless",
-                    cmd="env",
-                    env={"KEY": "VALUE"},
-                    replicas=3,
-                )
-                print(ids)
-            ```
+    Launch notebooks, desktops, CARTA, Firefly, contributed apps, or headless
+    workloads with `Session` or `AsyncSession`.
 
-    !!! example ":simple-gnubash: CLI"
+    [:octicons-arrow-right-16: Quickstart](quick-start.md)
 
-        ```bash title="Create a Session"
-        canfar launch headless --env KEY=VALUE --replicas 3 images.canfar.net/skaha/astroml:latest 
-        ```
+-   **Read data**
 
-=== ":material-download: Download"
+    Address VOSpace Services through explicit Storage Identifiers and standard
+    fsspec methods.
 
-    !!! info "Installation"
+    [:octicons-arrow-right-16: Data access](data.md)
 
-        ```bash title="Install from PyPI"
-        pip install canfar
-        ```
+-   **Inspect platform state**
 
-        ```bash title="Add as Dependency"
-        uv add canfar
-        ```
+    Query available resources, Container Images, and Science Platform Server
+    capacity.
 
-[:simple-python: Python Client](quick-start.md){: .md-button .md-button--primary }
-[:simple-gnubash: Explore the CLI](../cli/quick-start.md){: .md-button .md-button--primary }
-[:fontawesome-brands-github: Codebase](https://github.com/opencadc/canfar){: .md-button .md-button--primary }
+    [:octicons-arrow-right-16: Python API reference](session.md)
+
+</div>
+
+<span id="minimal-example"></span>
+<span id="async-example"></span>
+<span id="minimal-synchronous-example"></span>
+<span id="minimal-asynchronous-example"></span>
+
+## Try the same task in Python
+
+Both examples list your running notebooks and print the returned records.
+Choose **Sync Python** for a normal script, or **Async Python** when your
+application already uses `async` and `await`.
+
+=== "Sync Python"
+
+    ```python title="list_notebooks.py" hl_lines="1 3"
+    from canfar.sessions import Session
+
+    with Session() as session:
+        notebooks = session.fetch(kind="notebook", status="Running")
+        print(notebooks)
+    ```
+
+=== "Async Python"
+
+    ```python title="list_notebooks.py" hl_lines="3 6"
+    import asyncio
+
+    from canfar.sessions import AsyncSession
+
+    async def main() -> None:
+        async with AsyncSession() as session:
+            notebooks = await session.fetch(kind="notebook", status="Running")
+            print(notebooks)
+
+    if __name__ == "__main__":
+        asyncio.run(main())
+    ```
+
+An empty list means no notebooks match those filters. Follow the
+[Python tutorial](quick-start.md) to create, inspect, and clean up a Session.
+
+!!! tip "Using the async example in Jupyter"
+
+    Define `main()` without the final `if __name__` block, then run
+    `await main()` in another cell. Jupyter already has an event loop.
+
+## Main modules
+
+| Module | Use |
+| --- | --- |
+| `canfar.sessions` | Create, fetch, inspect, connect, log, and destroy Sessions. |
+| `canfar.images` | List Container Images or fetch parsed image details. |
+| `canfar.storage` | List Storage Identifiers and build explicit fsspec filesystems. |
+| `canfar.context` | Read resource limits advertised by a Science Platform Server. |
+| `canfar.overview` | Check Science Platform Server availability. |
+| `canfar.authentication` | Login and manage saved Authentication Records. |
+| `canfar.client` | Compose lower-level synchronous or asynchronous HTTP clients. |
+
+## Read next
+
+- [Install and set up](get-started.md)
+- [Python quickstart](quick-start.md)
+- [Examples](examples.md)
+- [Data access](data.md)
+- [Migration guide](migration.md)
+- [CANFAR Agent Skill](../platform/agent-skill.md)

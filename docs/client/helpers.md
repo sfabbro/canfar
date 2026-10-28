@@ -1,9 +1,11 @@
 # Helpers API
 
 !!! info "Overview"
-    The Helpers API provides utility functions to partition work across replicas of a CANFAR session. Containers receive `REPLICA_ID` and `REPLICA_COUNT` environment variables, and these helpers make using them simple and correct.
+    `canfar.helpers.distributed` partitions an ordered list across Session
+    replicas. Each replica container receives `REPLICA_ID` and `REPLICA_COUNT`
+    in its environment, and these functions read them by default.
 
-## Practical Examples
+## Practical examples
 
 ### Stripe: take every Nth item with an offset
 ```python
@@ -40,10 +42,16 @@ for item in distributed.chunk(work):
 ```
 
 ### Validation and errors
-- `replica` must be >= 1 and <= `total`
-- `total` must be > 0
 
-## API Reference
+`chunk()` requires `total > 0` and `1 <= replica <= total`, raising
+`ValueError` otherwise. `stripe()` intentionally keeps a looser compatibility
+contract: `replica < 1` yields no items, even when `total <= 0`. For a positive
+replica, `total <= 0` raises `ValueError`; otherwise `replica > total` yields
+no items. Both functions use `REPLICA_ID` and `REPLICA_COUNT` when
+their corresponding arguments are omitted, defaulting to one replica when the
+environment is absent.
+
+## API reference
 
 ::: canfar.helpers.distributed
     handler: python

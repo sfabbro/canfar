@@ -1,164 +1,195 @@
-# 5-Minute Quick Start (Python Client)
+# Python quickstart
 
-!!! success "Goal"
-    By the end of this guide, you'll authenticate, launch a compute Session on CANFAR programmatically, inspect it, read logs/events, and clean it up — all from Python.
+Create a notebook Session, open it, and keep your results before cleaning up.
+Run these examples on the computer where you installed and authenticated the
+client. Each code block can run as a separate script.
 
-!!! tip "Prerequisites"
-    - CADC Account — [Sign up](https://www.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/en/auth/request.html)
-    - You have logged in at least once to the [CANFAR Science Platform](https://canfar.net) and the [Harbor Container Registry](https://images.canfar.net)
-    - Python 3.10+
+!!! note "Choose a compatible client"
 
-## Installation
+    [Install and set up](get-started.md#install) first. These examples use the
+    released v1.5.2 client. Read the [upgrade guide](migration.md) when moving
+    from v1.4.1.
 
-<!-- termynal -->
-```
-> pip install canfar --upgrade
----> 100%
-Installed
-```
+Use the same tab throughout: **Sync Python** for a normal script, or
+**Async Python** for an application using `async` and `await`.
 
-## Authentication
+!!! tip "Running async examples in a notebook"
 
-The Python client automatically uses your active authentication context created by the CLI.
+    Define `main()` without its final `if __name__` block. In the next cell,
+    run `await main()` instead of `asyncio.run(main())`.
 
-```bash title="Login to CANFAR Science Platform"
-canfar auth login
-```
+## 1. Authenticate
 
-!!! note "Login Pathways"
-    - If you already have a valid CADC X509 certificate at `~/.ssl/cadcproxy.pem`, the CLI will reuse it automatically.
-    - If you're an SRCnet user, you'll be guided through an OIDC device flow in your browser.
-
-```bash title="Force Re-Login (optional)"
-canfar auth login --force
+```bash title="Terminal on your computer"
+canfar login cadc
+canfar image ls --kind notebook
 ```
 
-!!! success "What just happened?"
-    - The CLI discovered available CANFAR/SRCnet servers
-    - You authenticated and obtained a certificate/token
-    - The active context was saved for the Python client to use
+Choose an image from that listing. Replace the example image below if it is
+unavailable on your server. For SRCNet or direct Python login, see
+[authentication and server selection](get-started.md#authenticate).
 
-## Your First Notebook Session
+<span id="async-version"></span>
 
-Launch a Jupyter notebook session programmatically.
+## 2. Create a notebook
 
-=== "Notebook Session"
+=== "Sync Python"
 
-    ```python
+    ```python title="create_notebook.py" hl_lines="1 3"
     from canfar.sessions import Session
 
-    session = Session()
-    session_ids = session.create(
-        name="my-first-notebook",
-        image="images.canfar.net/skaha/astroml:latest",
-        kind="notebook",
-        cores=2,
-        ram=4,
-    )
-    print(session_ids)  # e.g., ["d1tsqexh"]
+    with Session() as session:
+        ids = session.create(
+            kind="notebook",
+            image="images.canfar.net/skaha/astroml:latest",
+            name="quickstart-notebook",
+            cores=2,
+            ram=4,
+        )
+        print(ids)
     ```
 
-=== "`async`"
+=== "Async Python"
 
-    ```python
+    ```python title="create_notebook.py" hl_lines="3 6"
+    import asyncio
+
     from canfar.sessions import AsyncSession
 
-    session = AsyncSession()
-    ids = await session.create(
-        name="my-first-notebook",
-        image="images.canfar.net/skaha/astroml:latest",
-        kind="notebook",
-        cores=2,
-        ram=4,
-    )
-    print(ids)  # e.g., ["d1tsqexh"]
+    async def main() -> None:
+        async with AsyncSession() as session:
+            ids = await session.create(
+                kind="notebook",
+                image="images.canfar.net/skaha/astroml:latest",
+                name="quickstart-notebook",
+                cores=2,
+                ram=4,
+            )
+            print(ids)
+
+    if __name__ == "__main__":
+        asyncio.run(main())
     ```
 
-!!! success "What just happened?"
-    - We connected to CANFAR using your active auth context
-    - A notebook container was requested with 2 CPU cores and 4 GB RAM
-    - The API returned the newly created session ID(s)
+You receive a list of successfully created Session IDs. Copy the ID and replace
+`SESSION_ID` in the following examples. If the list is empty, inspect the error
+before continuing. Creation does not mean the application is ready.
 
-### Get Connection URL
+<span id="3-open-the-notebook"></span>
+<span id="4-inspect-events-and-logs"></span>
 
-Fetch details and extract the connect URL to open your notebook.
+## 3. Inspect and connect
 
-=== "Connect to Session"
+=== "Sync Python"
 
-    ```python
-    session.connect(ids)
+    ```python title="open_notebook.py" hl_lines="1 3"
+    from canfar.sessions import Session
+
+    with Session() as session:
+        ids = ["SESSION_ID"]
+        print(session.info(ids))
+        session.connect(ids)
     ```
 
-=== "`async`"
+=== "Async Python"
 
-    ```python
-    await session.connect(ids)
+    ```python title="open_notebook.py" hl_lines="3 6"
+    import asyncio
+
+    from canfar.sessions import AsyncSession
+
+    async def main() -> None:
+        async with AsyncSession() as session:
+            ids = ["SESSION_ID"]
+            print(await session.info(ids))
+            await session.connect(ids)
+
+    if __name__ == "__main__":
+        asyncio.run(main())
     ```
 
-## Peek Under the Hood
+`info()` returns a list of dictionaries containing Session details.
+`connect()` opens a browser link for a ready Session and returns `None`.
+If it is still `Pending`, inspect the events below, then repeat this step when
+it reaches `Running`. Run your analysis in the notebook before cleaning up.
 
-When a session is created, it goes through a series of steps to be fully deployed. You can inspect the events to understand the progress, or capture them for monitoring.
+## 4. Read events and logs
 
-=== "Deployment Events"
+=== "Sync Python"
 
-    ```python
-    session.events(ids, verbose=True)
+    ```python title="inspect_notebook.py" hl_lines="1 3"
+    from canfar.sessions import Session
+
+    with Session() as session:
+        ids = ["SESSION_ID"]
+        print(session.events(ids))
+        print(session.logs(ids))
     ```
 
-=== "`async`"
+=== "Async Python"
 
-    ```python
-    await session.events(ids, verbose=True)
+    ```python title="inspect_notebook.py" hl_lines="3 6"
+    import asyncio
+
+    from canfar.sessions import AsyncSession
+
+    async def main() -> None:
+        async with AsyncSession() as session:
+            ids = ["SESSION_ID"]
+            print(await session.events(ids))
+            print(await session.logs(ids))
+
+    if __name__ == "__main__":
+        asyncio.run(main())
     ```
 
-At any point, you can also inspect the logs from the session. This is especially useful when launching long-running batch jobs.
+Events return a list of dictionaries; logs return a dictionary keyed by Session
+ID. A failed request may be omitted from these results. With `verbose=True`,
+these methods log their output and return `None` instead.
 
-=== "Session Logs"
+## 5. Clean up
 
-    ```python
-    session.logs(ids, verbose=True)
+!!! warning "Save your work first"
+
+    Save notebooks and results under `/arc` or another persistent destination.
+    Deleting a Session discards `/scratch` and unsaved application state.
+    Closing a Python client or browser tab does not delete the remote Session.
+
+Delete only the ID you created:
+
+=== "Sync Python"
+
+    ```python title="delete_notebook.py" hl_lines="1 3"
+    from canfar.sessions import Session
+
+    with Session() as session:
+        ids = ["SESSION_ID"]
+        print(session.destroy(ids))
     ```
 
-=== "`async`"
+=== "Async Python"
 
-    ```python
-    await session.logs(ids, verbose=True)
+    ```python title="delete_notebook.py" hl_lines="3 6"
+    import asyncio
+
+    from canfar.sessions import AsyncSession
+
+    async def main() -> None:
+        async with AsyncSession() as session:
+            ids = ["SESSION_ID"]
+            print(await session.destroy(ids))
+
+    if __name__ == "__main__":
+        asyncio.run(main())
     ```
 
-## Clean Up
+Each requested ID maps to `True` or `False`, indicating whether its deletion
+request succeeded. Keep failed IDs for investigation.
 
-When you're done, delete your session(s) to free resources for other users. :simple-happycow:
+<span id="troubleshooting"></span>
 
-=== "Destroy Session(s)"
+## Next steps
 
-    ```python
-    session.destroy(ids)
-    ```
-
-=== "`async`"
-
-    ```python
-    await session.destroy(ids)
-    ```
-
-## Troubleshooting
-
-- Session won't start?
-
- 
-    ```python title="Check available resources"
-    session.stats()
-    ```
-    ```python title="Check events/logs"
-    session.events(ids, verbose=True)
-    session.logs(ids, verbose=True)
-    ```
-    ```python title="Try smaller resources or different image"
-    session.create(..., cores=1, ram=2, image="images.canfar.net/skaha/astroml:latest")
-    ```
-
-- Authentication issues?
-
-    ```bash title="Force re-authentication"
-    canfar auth login --force --debug
-    ```
+- [Common examples](examples.md) for filtering, replicas, and private images.
+- [Advanced examples](advanced-examples.md) for a complete batch pipeline.
+- [Logging](../cli/logging.md) for diagnostics.

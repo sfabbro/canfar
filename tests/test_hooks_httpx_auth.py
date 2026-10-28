@@ -1,17 +1,17 @@
-"""Tests for the refactored HTTPx authentication hooks."""
+"""Tests for the refactored HTTPX2 authentication hooks."""
 
 import time
 from unittest.mock import Mock, patch
 
-import httpx
+import httpx2
 import pytest
 from pydantic import SecretStr
 
 from canfar.client import HTTPClient
+from canfar.exceptions.context import AuthRequiredError
 from canfar.hooks.httpx.auth import AuthenticationError, arefresh, refresh
-from canfar.models.auth import OIDC, X509
-from canfar.models.config import Configuration
-from canfar.models.http import Server
+from canfar.models.auth import OIDCCredential
+from tests.helpers.config import oidc_config, x509_config
 from tests.test_auth_x509 import generate_cert
 
 
@@ -23,43 +23,43 @@ def oidc_client() -> HTTPClient:
     - Access token is expired.
     - Refresh token is valid and present.
     """
-    oidc_context = OIDC(
-        server=Server(name="TestOIDC", url="https://oidc.example.com", version="v1"),
-        endpoints={
-            "discovery": "https://oidc.example.com/.well-known/openid-configuration",
-            "token": "https://oidc.example.com/token",
-        },
-        client={"identity": "test-client", "secret": "test-secret"},
-        token={"access": "expired-token", "refresh": "valid-refresh-token"},
-        expiry={
-            "access": time.time() - 60,  # Expired
-            "refresh": time.time() + 3600,  # Valid
-        },
+    config = oidc_config(
+        idp="testoidc",
+        access="expired-token",
+        refresh="valid-refresh-token",
+        access_expiry=time.time() - 60,
+        refresh_expiry=time.time() + 3600,
     )
-    config = Configuration(active="TestOIDC", contexts={"TestOIDC": oidc_context})
     client = HTTPClient(config=config)
-    # Mock the internal httpx clients to check header updates
-    client._client = Mock(spec=httpx.Client, headers={})  # noqa: SLF001
-    client._asynclient = Mock(spec=httpx.AsyncClient, headers={})  # noqa: SLF001
+    # Mock the internal httpx2 clients to check header updates
+    client._client = Mock(spec=httpx2.Client, headers={})  # noqa: SLF001
+    client._asynclient = Mock(spec=httpx2.AsyncClient, headers={})  # noqa: SLF001
     return client
 
 
 class TestSyncHook:
     """Tests for the synchronous `hook` function."""
 
-    @patch("canfar.models.config.Configuration.save")
-    @patch("canfar.utils.jwt.expiry", return_value=time.time() + 3600)
-    @patch("canfar.auth.oidc.sync_refresh", return_value=SecretStr("new-access-token"))
+    @patch("canfar.config.editor.ConfigurationEditor.save")
+    @patch(
+        "canfar.auth.oidc.sync_refresh",
+        return_value={
+            "access_token": "new-access-token",
+            "refresh_token": "rotated-refresh-token",
+            "token_type": "Bearer",
+            "scope": "openid profile",
+            "expires_at": 4_000.0,
+        },
+    )
     def test_successful_refresh(
         self,
         mock_refresh,
-        mock_expiry,  # noqa: ARG002
         mock_save,
         oidc_client,
     ) -> None:
         """Verify a successful token refresh updates state and headers."""
         hook_func = refresh(oidc_client)
-        request = httpx.Request("GET", "https://oidc.example.com")
+        request = httpx2.Request("GET", "https://oidc.example.com")
 
         hook_func(request)
 
@@ -72,27 +72,28 @@ class TestSyncHook:
         # Verify the main client's headers were updated
         assert oidc_client.client.headers["Authorization"] == "Bearer new-access-token"
 
-        # Verify the context in the config was updated
-        new_context = oidc_client.config.context
-        assert isinstance(new_context, OIDC)
-        assert new_context.token.access == "new-access-token"
-        assert new_context.expiry.access > time.time()
+        credential = oidc_client.config.authentication[
+            oidc_client.config.active.authentication
+        ]
+        assert isinstance(credential, OIDCCredential)
+        assert credential.token.access is not None
+        assert credential.token.access.get_secret_value() == "new-access-token"
+        assert credential.token.refresh is not None
+        assert credential.token.refresh.get_secret_value() == "rotated-refresh-token"
+        assert credential.token.token_type == "Bearer"
+        assert credential.token.scope == "openid profile"
+        assert credential.expiry.access == 4_000.0
+        assert credential.expiry.refresh is None
 
     @patch("canfar.auth.oidc.sync_refresh")
     def test_skip_if_not_oidc_context(self, mock_refresh, tmp_path) -> None:
-        """Verify the hook does nothing if the active context is not OIDC."""
+        """Verify the hook does nothing if active Authentication is not OIDC."""
         cert_path = tmp_path / "cert.pem"
         generate_cert(cert_path)
-        x509_context = X509(
-            server=Server(
-                name="TestX509", url="https://x509.example.com", version="v0"
-            ),
-            path=cert_path,
-        )
-        config = Configuration(active="TestX509", contexts={"TestX509": x509_context})
+        config = x509_config(idp="testx509", path=cert_path, version="v0")
         client = HTTPClient(config=config)
         hook_func = refresh(client)
-        request = httpx.Request("GET", "/")
+        request = httpx2.Request("GET", "/")
 
         hook_func(request)
         mock_refresh.assert_not_called()
@@ -102,7 +103,7 @@ class TestSyncHook:
         """Verify the hook does nothing if runtime credentials are provided."""
         client = HTTPClient(token=SecretStr("runtime-token"), url="https://runtime.com")
         hook_func = refresh(client)
-        request = httpx.Request("GET", "/")
+        request = httpx2.Request("GET", "/")
 
         hook_func(request)
         mock_refresh.assert_not_called()
@@ -110,18 +111,31 @@ class TestSyncHook:
     @patch("canfar.auth.oidc.sync_refresh")
     def test_skip_if_token_not_expired(self, mock_refresh, oidc_client) -> None:
         """Verify the hook does nothing if the access token is not expired."""
-        oidc_client.config.context.expiry.access = time.time() + 3600  # Make it valid
+        credential = oidc_client.config.authentication[
+            oidc_client.config.active.authentication
+        ]
+        assert isinstance(credential, OIDCCredential)
+        oidc_client.config.editor.set(
+            f"authentication.{credential.idp}",
+            credential.model_copy(
+                update={
+                    "expiry": credential.expiry.model_copy(
+                        update={"access": time.time() + 3600}
+                    )
+                }
+            ),
+        )
         hook_func = refresh(oidc_client)
-        request = httpx.Request("GET", "/")
+        request = httpx2.Request("GET", "/")
 
         hook_func(request)
         mock_refresh.assert_not_called()
 
-    @patch("canfar.auth.oidc.sync_refresh", side_effect=Exception("Network Error"))
+    @patch("canfar.auth.oidc.sync_refresh", side_effect=ValueError("Network Error"))
     def test_refresh_failure_raises_error(self, mock_refresh, oidc_client) -> None:  # noqa: ARG002
         """Verify that a failure during refresh raises AuthenticationError."""
         hook_func = refresh(oidc_client)
-        request = httpx.Request("GET", "/")
+        request = httpx2.Request("GET", "/")
 
         with pytest.raises(AuthenticationError, match="Failed to refresh OIDC token"):
             hook_func(request)
@@ -130,19 +144,26 @@ class TestSyncHook:
 class TestAsyncHook:
     """Tests for the asynchronous `ahook` function."""
 
-    @patch("canfar.models.config.Configuration.save")
-    @patch("canfar.utils.jwt.expiry", return_value=time.time() + 3600)
-    @patch("canfar.auth.oidc.refresh", return_value=SecretStr("new-async-token"))
+    @patch("canfar.config.editor.ConfigurationEditor.save")
+    @patch(
+        "canfar.auth.oidc.refresh",
+        return_value={
+            "access_token": "new-async-token",
+            "refresh_token": "rotated-async-refresh",
+            "token_type": "Bearer",
+            "scope": "openid email",
+            "expires_at": 5_000.0,
+        },
+    )
     async def test_successful_async_refresh(
         self,
         mock_refresh,
-        mock_expiry,  # noqa: ARG002
         mock_save,
         oidc_client,
     ) -> None:
         """Verify a successful async token refresh updates state and headers."""
         hook_func = arefresh(oidc_client)
-        request = httpx.Request("GET", "https://oidc.example.com")
+        request = httpx2.Request("GET", "https://oidc.example.com")
 
         await hook_func(request)
 
@@ -154,30 +175,33 @@ class TestAsyncHook:
             oidc_client.asynclient.headers["Authorization"] == "Bearer new-async-token"
         )
 
-        new_context = oidc_client.config.context
-        assert isinstance(new_context, OIDC)
-        assert new_context.token.access == "new-async-token"
+        credential = oidc_client.config.authentication[
+            oidc_client.config.active.authentication
+        ]
+        assert isinstance(credential, OIDCCredential)
+        assert credential.token.access is not None
+        assert credential.token.access.get_secret_value() == "new-async-token"
+        assert credential.token.refresh is not None
+        assert credential.token.refresh.get_secret_value() == "rotated-async-refresh"
+        assert credential.token.token_type == "Bearer"
+        assert credential.token.scope == "openid email"
+        assert credential.expiry.access == 5_000.0
+        assert credential.expiry.refresh is None
 
     @patch("canfar.auth.oidc.refresh")
     async def test_skip_if_not_oidc_context_async(self, mock_refresh, tmp_path) -> None:
         """Verify the async hook does nothing for non-OIDC contexts."""
         cert_path = tmp_path / "cert.pem"
         generate_cert(cert_path)
-        x509_context = X509(
-            server=Server(
-                name="TestX509", url="https://x509.example.com", version="v0"
-            ),
-            path=cert_path,
-        )
-        config = Configuration(active="TestX509", contexts={"TestX509": x509_context})
+        config = x509_config(idp="testx509", path=cert_path, version="v0")
         client = HTTPClient(config=config)
         hook_func = arefresh(client)
-        request = httpx.Request("GET", "/")
+        request = httpx2.Request("GET", "/")
 
         await hook_func(request)
         mock_refresh.assert_not_called()
 
-    @patch("canfar.auth.oidc.refresh", side_effect=Exception("Async Network Error"))
+    @patch("canfar.auth.oidc.refresh", side_effect=ValueError("Async Network Error"))
     async def test_async_refresh_failure_raises_error(
         self,
         mock_refresh,  # noqa: ARG002
@@ -185,7 +209,84 @@ class TestAsyncHook:
     ) -> None:
         """Verify a failure during async refresh raises AuthenticationError."""
         hook_func = arefresh(oidc_client)
-        request = httpx.Request("GET", "/")
+        request = httpx2.Request("GET", "/")
 
         with pytest.raises(AuthenticationError, match="Failed to refresh OIDC token"):
             await hook_func(request)
+
+
+class TestSyncAsyncParity:
+    """Characterization tests: sync and async auth hooks share guard behavior."""
+
+    async def test_empty_runtime_token_keeps_saved_oidc_sync_and_async(self) -> None:
+        """An empty runtime token does not bypass either saved OIDC hook."""
+        config = oidc_config(
+            idp="testoidc",
+            access="saved-access-token",
+            access_expiry=time.time() + 3600,
+            refresh_expiry=time.time() + 7200,
+        )
+        client = HTTPClient(
+            config=config,
+            token=SecretStr(""),
+            url="https://platform.example",
+        )
+
+        sync_request = httpx2.Request("GET", "https://platform.example/sync")
+        refresh(client)(sync_request)
+        assert sync_request.headers["Authorization"] == "Bearer saved-access-token"
+
+        async with client:
+            async_request = httpx2.Request("GET", "https://platform.example/async")
+            await arefresh(client)(async_request)
+
+        assert async_request.headers["Authorization"] == "Bearer saved-access-token"
+        client._close()  # noqa: SLF001
+
+    @patch("canfar.auth.oidc.sync_refresh")
+    @patch("canfar.auth.oidc.refresh")
+    async def test_refresh_and_arefresh_both_skip_non_oidc(
+        self,
+        mock_async_refresh,
+        mock_sync_refresh,
+        tmp_path,
+    ) -> None:
+        """Both refresh and arefresh skip when the Authentication Record is not OIDC."""
+        cert_path = tmp_path / "cert.pem"
+        generate_cert(cert_path)
+        config = x509_config(idp="testx509", path=cert_path, version="v0")
+        client = HTTPClient(config=config)
+        request = httpx2.Request("GET", "/")
+
+        refresh(client)(request)
+        mock_sync_refresh.assert_not_called()
+
+        await arefresh(client)(request)
+        mock_async_refresh.assert_not_called()
+
+    @patch("canfar.auth.oidc.sync_refresh")
+    @patch("canfar.auth.oidc.refresh")
+    async def test_invalid_record_requires_login_in_sync_and_async_refresh(
+        self,
+        mock_async_refresh,
+        mock_sync_refresh,
+    ) -> None:
+        """An invalid canonical record is unrefreshable in both request paths."""
+        config = oidc_config(
+            idp="testoidc",
+            discovery=None,
+            access="expired-token",
+            refresh="valid-refresh-token",
+            access_expiry=time.time() - 60,
+            refresh_expiry=time.time() + 3600,
+        )
+        client = HTTPClient(config=config)
+        request = httpx2.Request("GET", "/")
+
+        with pytest.raises(AuthRequiredError):
+            refresh(client)(request)
+        mock_sync_refresh.assert_not_called()
+
+        with pytest.raises(AuthRequiredError):
+            await arefresh(client)(request)
+        mock_async_refresh.assert_not_called()

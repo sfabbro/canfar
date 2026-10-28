@@ -1,0 +1,148 @@
+"""Dotted-path editing helpers for configuration objects."""
+
+from __future__ import annotations
+
+import os
+import tempfile
+from contextlib import suppress
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+import yaml
+from pydantic import ValidationError
+
+from canfar.models.auth import OIDCCredential
+
+if TYPE_CHECKING:
+    from canfar.models.config import Configuration
+
+
+def _parse_dotted_path(path: str) -> list[str]:
+    segments: list[str] = []
+    for raw in path.split("."):
+        if not raw:
+            msg = f"Invalid path {path!r}: empty segment"
+            raise ValueError(msg)
+        if raw.isdigit():
+            msg = "List indices are not supported in configuration paths"
+            raise ValueError(msg)
+        segments.append(raw)
+    return segments
+
+
+def get_value(config: Configuration, path: str) -> Any:
+    """Get a nested configuration value via dotted path."""
+    value: Any = config.model_dump(mode="json", exclude_none=False)
+    for segment in _parse_dotted_path(path):
+        if not isinstance(value, dict):
+            msg = f"Expected mapping for key {segment!r}"
+            raise KeyError(msg)
+        value = value[segment]
+    return value
+
+
+def _validated_copy(config: Configuration, **updates: Any) -> Configuration:
+    """Validate a source-isolated copy of a complete Configuration."""
+    return config.from_document({**config.model_dump(mode="python"), **updates})
+
+
+def _updated_data(config: Configuration, path: str, value: Any) -> dict[str, Any]:
+    """Return serialized top-level data with one dotted-path value updated."""
+    *parents, leaf = _parse_dotted_path(path)
+    data = config.model_dump(mode="python")
+    cursor: Any = data
+    for segment in parents:
+        if cursor.get(segment) is None:
+            cursor[segment] = {}
+        cursor = cursor[segment]
+        if not isinstance(cursor, dict):
+            msg = f"Expected mapping below key {segment!r}"
+            raise TypeError(msg)
+    cursor[leaf] = value
+    return data
+
+
+def _restore_oidc_secrets(config: Configuration, data: dict[str, Any]) -> None:
+    """Replace masked ``SecretStr`` placeholders with values for YAML persistence."""
+    authentication = data.get("authentication")
+    if not isinstance(authentication, dict):
+        return
+
+    for idp, credential_data in authentication.items():
+        credential = config.authentication.get(idp)
+        if not isinstance(credential, OIDCCredential) or not isinstance(
+            credential_data, dict
+        ):
+            continue
+
+        client = credential_data.get("client")
+        if isinstance(client, dict) and credential.client.secret is not None:
+            client["secret"] = credential.client.secret.get_secret_value()
+
+        token = credential_data.get("token")
+        if not isinstance(token, dict):
+            continue
+        if credential.token.access is not None:
+            token["access"] = credential.token.access.get_secret_value()
+        if credential.token.refresh is not None:
+            token["refresh"] = credential.token.refresh.get_secret_value()
+
+
+def _save_config(config: Configuration) -> None:
+    """Atomically save a validated Configuration to YAML."""
+    # Resolved at call time so tests can isolate the configuration path.
+    from canfar.models.config import CONFIG_PATH  # noqa: PLC0415
+
+    target = CONFIG_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        candidate = _validated_copy(config)
+        data = candidate.model_dump(mode="json", exclude_none=True)
+        _restore_oidc_secrets(candidate, data)
+        serialized = yaml.dump(data, default_flow_style=False, sort_keys=True, indent=2)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(target)
+    except (OSError, TypeError, ValidationError) as exc:
+        if temporary is not None:
+            with suppress(OSError):
+                temporary.unlink(missing_ok=True)
+        msg = f"Failed to save configuration to {target}: {exc}"
+        raise OSError(msg) from exc
+
+
+@dataclass(slots=True)
+class ConfigurationEditor:
+    """Bound editing and persistence boundary for a Configuration."""
+
+    _config: Configuration
+
+    def _set_top_level(self, **updates: Any) -> Configuration:
+        """Validate and install one complete top-level configuration update."""
+        updated = _validated_copy(self._config, **updates)
+        self._config.__dict__ = updated.__dict__.copy()
+        self._config.__pydantic_fields_set__ = updated.__pydantic_fields_set__.copy()
+        return self._config
+
+    def get(self, key: str) -> Any:
+        """Read a scalar, mapping, or whole-list value by dotted path."""
+        return get_value(self._config, key)
+
+    def set(self, key: str, value: Any) -> Configuration:
+        """Validate and install a dotted-path update on the bound config."""
+        return self._set_top_level(**_updated_data(self._config, key, value))
+
+    def save(self) -> None:
+        """Atomically persist the bound Configuration."""
+        _save_config(self._config)

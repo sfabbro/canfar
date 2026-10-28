@@ -2,37 +2,82 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import ssl
-from contextlib import asynccontextmanager, contextmanager
+from datetime import datetime, timezone
+from email.utils import formatdate
 from pathlib import Path
-from time import asctime, gmtime
 from typing import TYPE_CHECKING, Any
 
-from httpx import URL, AsyncClient, Client, Limits, Timeout
+from httpx2 import (
+    URL,
+    AsyncBaseTransport,
+    AsyncClient,
+    BaseTransport,
+    Client,
+    Limits,
+    Request,
+    Response,
+    Timeout,
+)
 from pydantic import (
     AnyHttpUrl,
     Field,
     PrivateAttr,
     SecretStr,
-    field_validator,
     model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing_extensions import Self
 
-from canfar import __version__, get_logger, set_log_level
-from canfar.auth import x509
-from canfar.exceptions.context import AuthContextError
-from canfar.hooks.httpx import auth, errors, expiry
+from canfar import __version__
+from canfar.auth import oidc, x509
+from canfar.exceptions.context import AuthContextError, AuthRequiredError
+from canfar.hooks.httpx import auth, debug, errors, expiry
+from canfar.models.auth import (
+    AuthenticationCredential,
+    OIDCCredential,
+    RuntimeCredential,
+    X509Credential,
+)
 from canfar.models.config import Configuration
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
     from types import TracebackType
 
-    from canfar.models.config import AuthContext
+log = logging.getLogger(__name__)
 
-log = get_logger(__name__)
+
+def _has_runtime_token(token: SecretStr | None) -> bool:
+    """Return whether a runtime token contains a non-empty value."""
+    return token is not None and bool(token.get_secret_value())
+
+
+class _UnclosableTransport(BaseTransport):
+    """Wrap a caller-owned synchronous transport so client close is a no-op."""
+
+    def __init__(self, transport: BaseTransport) -> None:
+        self._transport = transport
+
+    def handle_request(self, request: Request) -> Response:
+        return self._transport.handle_request(request)
+
+    def close(self) -> None:
+        """Preserve caller ownership; do not close the underlying transport."""
+
+
+class _UnclosableAsyncTransport(AsyncBaseTransport):
+    """Wrap a caller-owned asynchronous transport so client aclose is a no-op."""
+
+    def __init__(self, transport: AsyncBaseTransport) -> None:
+        self._transport = transport
+
+    async def handle_async_request(self, request: Request) -> Response:
+        return await self._transport.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        """Preserve caller ownership; do not close the underlying transport."""
 
 
 class HTTPClient(BaseSettings):
@@ -46,8 +91,9 @@ class HTTPClient(BaseSettings):
 
     1.  **Runtime Arguments/Environment Variables**: A `token` or `certificate`
         provided at instantiation (e.g., `CANFAR_TOKEN="..."`).
-    2.  **Active Configuration Context**: The context specified by `active_context`
-        in the loaded configuration file.
+    2.  **Saved Authentication**: The Authentication Record named by transient
+        ``authentication_idp`` or ``active.authentication``, plus the active Server
+        Selection when no explicit ``url`` is supplied.
 
     Raises:
         ValueError: If configuration is invalid.
@@ -81,10 +127,21 @@ class HTTPClient(BaseSettings):
         description="The server URL for runtime credentials.",
         examples=["https://ws-uv.canfar.net/server/v0/"],
     )
+    authentication_idp: str | None = Field(
+        default=None,
+        title="Transient Authentication IDP",
+        description=(
+            "Optional Authentication Record selector for this client only; "
+            "does not change persisted Authentication or Server Selection."
+        ),
+        exclude=True,
+    )
     timeout: int = Field(
         30,
         title="HTTP Timeout",
-        description="HTTP request timeout in seconds.",
+        description=(
+            "HTTP inactivity timeout in seconds. Async pool waits have no deadline."
+        ),
         gt=0,
         le=300,
     )
@@ -95,14 +152,12 @@ class HTTPClient(BaseSettings):
         ge=1,
         le=128,
     )
-    loglevel: int | str = Field(
-        default="INFO",
-        title="Logging level for the client.",
-        description="10=DEBUG, 20=INFO, 30=WARNING, 40=ERROR, 50=CRITICAL",
-        examples=["info", "10"],
-        validate_default=False,
+    raise_http_errors: bool = Field(
+        default=True,
+        title="Raise HTTP Errors",
+        description="Install response hooks that raise HTTP status errors.",
+        exclude=True,
     )
-
     # Composed configuration object
     config: Configuration = Field(
         default_factory=Configuration,
@@ -113,54 +168,71 @@ class HTTPClient(BaseSettings):
     # Private attributes
     _client: Client | None = PrivateAttr(default=None)
     _asynclient: AsyncClient | None = PrivateAttr(default=None)
+    _refresh_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
+    _transport: BaseTransport | AsyncBaseTransport | None = PrivateAttr(default=None)
+
+    def __init__(
+        self,
+        *,
+        transport: BaseTransport | AsyncBaseTransport | None = None,
+        **values: Any,
+    ) -> None:
+        # A constructor argument, not a field, so no settings source can supply it.
+        super().__init__(**values)
+        if transport is not None and self._uses_x509():
+            msg = (
+                "Injected transport cannot be used with X.509 client certificate "
+                "authentication; Bearer tokens only."
+            )
+            raise ValueError(msg)
+        self._transport = transport
+
+    @property
+    def transport(self) -> BaseTransport | AsyncBaseTransport | None:
+        """Return the caller-owned httpx2 transport, if one was injected."""
+        return self._transport
 
     # Client Properties
     @property
     def client(self) -> Client:
-        """Get the synchronous HTTPx Client.
+        """Get the synchronous HTTPX2 Client.
 
         Returns:
-            Client: The synchronous HTTPx client.
+            Client: The synchronous HTTPX2 client.
         """
         if not self._client:
-            self._client = self._create_sync_client()
-            log.debug("Synchronous HTTPx client created")
+            self._client = Client(**self._client_options(asynchronous=False))
+            log.debug("Synchronous HTTPX2 client created")
         return self._client
 
     @property
     def asynclient(self) -> AsyncClient:
-        """Get the asynchronous HTTPx Async Client."""
+        """Get the asynchronous HTTPX2 Async Client."""
         if not self._asynclient:
-            self._asynclient = self._create_async_client()
-            log.debug("Asynchronous HTTPx client created")
+            self._asynclient = AsyncClient(**self._client_options(asynchronous=True))
+            log.debug("Asynchronous HTTPX2 client created")
         return self._asynclient
 
-    @field_validator("loglevel", mode="before")
-    @classmethod
-    def _validate_loglevel(cls, value: int | str) -> str:
-        """Validate and set the log level.
+    @property
+    def uses_runtime_credentials(self) -> bool:
+        """Return whether runtime token or certificate credentials are active."""
+        return _has_runtime_token(self.token) or self.certificate is not None
 
-        Args:
-            value (int | str): Log level as an integer or string.
-
-        Returns:
-            str: Log level as a string.
-        """
-        valid: dict[int, str] = {
-            0: "NOTSET",
-            10: "DEBUG",
-            20: "INFO",
-            30: "WARNING",
-            40: "ERROR",
-            50: "CRITICAL",
-        }
-        if isinstance(value, int):
-            value = valid[value]
-        value = value.upper()
-        assert value in valid.values(), f"Invalid log level: {value}"
-        set_log_level(value)
-        log.debug("Logging level set to %s", value)
-        return value
+    @property
+    def authentication_record(self) -> AuthenticationCredential | None:
+        """Return this client's selected usable Authentication Record, if any."""
+        idp = (
+            self.config.active.authentication
+            if self.authentication_idp is None
+            else self.authentication_idp
+        )
+        try:
+            credential = self.config.authentication[idp]
+        except KeyError:
+            return None
+        if isinstance(credential, X509Credential) and credential.path is None:
+            return None
+        return credential
 
     @model_validator(mode="after")
     def _validate(self) -> Self:
@@ -172,49 +244,144 @@ class HTTPClient(BaseSettings):
         Returns:
             Self: The configured client.
         """
-        if self.token and self.certificate:
+        if _has_runtime_token(self.token) and self.certificate is not None:
             log.warning("Both runtime token and certificate values provided.")
             log.warning("Runtime token takes precedence over certificate.")
             log.warning("Certificate will be ignored in favor of the token.")
             self.certificate = None  # Nullify certificate to ensure token is used
 
-        if (self.token or self.certificate) and not self.url:
+        if self.uses_runtime_credentials and not self.url:
             msg = "Server URL must be provided when using runtime credentials."
             raise ValueError(msg)
 
-        if self.certificate:
+        if self.certificate is not None:
             info = x509.inspect(self.certificate)
-            expiry = {asctime(gmtime(info["expiry"]))}
+            expiry = datetime.fromtimestamp(info["expiry"], tz=timezone.utc).isoformat()
             msg = f"{self.certificate} valid till {expiry}"
             log.debug(msg)
 
         return self
 
-    def _create_async_client(self) -> AsyncClient:
-        """Create an asynchronous HTTPx client.
+    def _uses_x509(self) -> bool:
+        """Return whether requests would authenticate with a client certificate."""
+        return self.certificate is not None or (
+            not _has_runtime_token(self.token)
+            and isinstance(self.authentication_record, X509Credential)
+        )
+
+    def _client_options(self, *, asynchronous: bool) -> dict[str, Any]:
+        """Return the keyword arguments for a sync or async HTTPX2 client."""
+        credential = self._resolved_authentication_record()
+        return {
+            **self._get_client_kwargs(asynchronous, credential=credential),
+            "headers": self._get_http_headers(credential=credential),
+        }
+
+    def _resolved_authentication_record(self) -> AuthenticationCredential | None:
+        """Resolve saved Authentication Record once for client construction."""
+        if self.uses_runtime_credentials:
+            return None
+        credential = self.authentication_record
+        if (
+            isinstance(credential, OIDCCredential)
+            and not credential.access_usable
+            and not credential.valid
+        ):
+            raise AuthRequiredError(
+                credential.idp,
+                "OIDC Authentication Record cannot refresh tokens.",
+            )
+        return credential
+
+    async def _refresh_oidc(self) -> OIDCCredential | None:
+        """Resolve and refresh the canonical saved OIDC record under one lock."""
+        async with self._refresh_lock:
+            prepared = auth._refresh(self)  # noqa: SLF001
+            if prepared is None:
+                return None
+            credential, parameters = prepared
+            if parameters is None:
+                return credential
+            try:
+                refreshed = await oidc.refresh(*parameters)
+                return oidc._persist(  # noqa: SLF001
+                    self.config,
+                    credential,
+                    refreshed,
+                )
+            except oidc.ReauthenticationRequiredError as err:
+                raise AuthRequiredError(credential.idp, str(err)) from None
+            except (ValueError, OSError):
+                msg = "Failed to refresh OIDC token"
+                raise auth.AuthenticationError(msg) from None
+
+    @classmethod
+    def build(
+        cls,
+        *,
+        config: Configuration,
+        authentication_idp: str,
+        url: Any,
+        token: Any = None,
+        certificate: Any = None,
+        **extra: Any,
+    ) -> Self:
+        """Build a client, omitting runtime credentials that were not supplied.
+
+        Unset credentials are omitted rather than passed as ``None`` so the
+        settings sources stay free to supply them.
+
+        Args:
+            config: Configuration backing the client.
+            authentication_idp: Canonical Identity Provider key.
+            url: Base URL for the client.
+            token: Runtime bearer token, when overriding the saved record.
+            certificate: Runtime X.509 certificate path, when overriding it.
+            **extra: Further client settings passed through unchanged.
 
         Returns:
-            AsyncClient: The asynchronous HTTPx client.
+            A client of the calling class bound to the supplied credentials.
         """
-        kwargs = self._get_client_kwargs(asynchronous=True)
-        log.debug("HTTPx async client kwargs: %s", kwargs)
-        headers = self._get_http_headers()
-        client = AsyncClient(**kwargs)
-        client.headers.update(headers)
-        return client
+        supplied = {"token": token, "certificate": certificate}
+        return cls(
+            config=config,
+            authentication_idp=authentication_idp,
+            url=url,
+            **{key: value for key, value in supplied.items() if value is not None},
+            **extra,
+        )
 
-    def _create_sync_client(self) -> Client:
-        """Create a synchronous HTTPx client.
+    async def _materialize_credentials(self) -> RuntimeCredential:
+        """Return one literal token or validated certificate path.
 
         Returns:
-            Client: The synchronous HTTPx client.
+            RuntimeCredential: Exactly one of a bearer token or a certificate.
         """
-        kwargs = self._get_client_kwargs(asynchronous=False)
-        log.debug("HTTPx sync client kwargs: %s", kwargs)
-        headers = self._get_http_headers()
-        client = Client(**kwargs)
-        client.headers.update(headers)
-        return client
+        if _has_runtime_token(self.token):
+            assert self.token is not None
+            return RuntimeCredential(token=self.token.get_secret_value())
+        if self.certificate is not None:
+            return RuntimeCredential(certificate=x509.valid(self.certificate))
+
+        credential = self.authentication_record
+        if isinstance(credential, X509Credential):
+            if credential.path is None:
+                raise ValueError
+            return RuntimeCredential(
+                certificate=str(x509.inspect(credential.path)["path"])
+            )
+        if not isinstance(credential, OIDCCredential):
+            raise TypeError
+
+        credential = await self._refresh_oidc()
+        if credential is None:
+            raise ValueError
+        if credential.token.access is None:
+            raise ValueError
+        token = credential.token.access.get_secret_value()
+        if not token:
+            raise ValueError
+        return RuntimeCredential(token=token)
 
     def _get_base_url(self) -> URL:
         """Get the base URL for the client.
@@ -224,69 +391,131 @@ class HTTPClient(BaseSettings):
         """
         if self.url:
             return URL(str(self.url))
-        # Get the active context
-        ctx: AuthContext = self.config.context
-        if not ctx.server:
-            msg = f"Server not found in auth context: {ctx}"
+        name = self.config.active.server
+        server = self.config.servers.get(name) if name is not None else None
+        if server is None:
+            msg = (
+                "Server not found for Authentication Record: "
+                f"{self.config.active.authentication}"
+            )
             raise ValueError(msg)
-        return URL(f"{ctx.server.url}/{ctx.server.version}")
+        if server.url is None:
+            msg = f"Active server has no URL configured: {server}"
+            raise ValueError(msg)
+        return URL(f"{server.url}/{server.version}")
 
-    def _get_client_kwargs(self, asynchronous: bool) -> dict[str, Any]:
-        """Get the keyword arguments for creating an HTTPx client.
+    def _configured_transport(
+        self, *, asynchronous: bool
+    ) -> BaseTransport | AsyncBaseTransport | None:
+        """Resolve and validate caller-injected transport for sync or async client."""
+        if self.transport is None:
+            return None
+        if asynchronous:
+            if not isinstance(self.transport, AsyncBaseTransport):
+                msg = (
+                    "Async client requires an AsyncBaseTransport; "
+                    f"got {type(self.transport).__name__}"
+                )
+                raise TypeError(msg)
+            return _UnclosableAsyncTransport(self.transport)
+        if not isinstance(self.transport, BaseTransport):
+            msg = (
+                "Sync client requires a BaseTransport; "
+                f"got {type(self.transport).__name__}"
+            )
+            raise TypeError(msg)
+        return _UnclosableTransport(self.transport)
+
+    def _get_client_kwargs(
+        self,
+        asynchronous: bool,
+        *,
+        credential: AuthenticationCredential | None,
+    ) -> dict[str, Any]:
+        """Get the keyword arguments for creating an HTTPX2 client.
 
         Args:
             asynchronous (bool): Whether the client is asynchronous.
+            credential: Pre-resolved Authentication Record for this client build.
 
         Returns:
-            dict[str, Any]: Keyword arguments for creating an HTTPx client.
+            dict[str, Any]: Keyword arguments for creating an HTTPX2 client.
         """
-        checker = expiry.acheck(self) if asynchronous else expiry.check(self)
-        catcher = errors.acatch if asynchronous else errors.catch
         kwargs: dict[str, Any] = {
             "timeout": Timeout(self.timeout),
-            "event_hooks": {"request": [checker], "response": [catcher]},
+            "event_hooks": self._get_event_hooks(
+                asynchronous=asynchronous,
+                credential=credential,
+            ),
             "base_url": self._get_base_url(),
         }
-        # Configure connection pooling for async clients
         if asynchronous:
-            kwargs["limits"] = Limits(
-                max_connections=self.concurrency,
-                max_keepalive_connections=self.concurrency // 4,
-            )
-        # Get the active auth context
-        ctx: AuthContext = self.config.context
+            # Queued bulk requests wait for a connection without timing out locally.
+            kwargs["timeout"] = Timeout(self.timeout, pool=None)
+            if self.transport is None:
+                kwargs["limits"] = Limits(
+                    max_connections=self.concurrency,
+                    max_keepalive_connections=self.concurrency // 4,
+                )
 
-        # Prioritize user-provided credentials over configuration
-        if self.token:
+        transport = self._configured_transport(asynchronous=asynchronous)
+        if transport is not None:
+            kwargs["transport"] = transport
+
+        if _has_runtime_token(self.token):
             return kwargs
 
-        if self.certificate:
-            msg = "creating runtime ssl context with: {self.certificate}"
-            log.debug(msg)
+        if self.certificate is not None:
+            log.debug("Creating runtime SSL context with: %s", self.certificate)
             kwargs["verify"] = self._get_ssl_context(self.certificate)
             return kwargs
 
-        # No user-provided credentials, use configured context
-        # Note: The refresh hook must be the first request hook to run, since it may
-        #       update the context and headers. The expiry hook will then check the
-        #       updated context for expiry.
-        if ctx.mode == "oidc":
-            assert ctx.valid, "Invalid OIDC context provided."
-            refresher = auth.arefresh(self) if asynchronous else auth.refresh(self)
-            kwargs["event_hooks"]["request"].insert(0, refresher)
-            return kwargs
-
-        if ctx.mode in {"x509", "default"}:
-            assert isinstance(ctx.path, Path), "X509 path must be a pathlike object."
+        if isinstance(credential, X509Credential):
+            if credential.path is None:
+                raise AuthRequiredError(
+                    credential.idp,
+                    "X.509 certificate path is missing.",
+                )
             try:
-                x509.valid(ctx.path)
-                kwargs["verify"] = self._get_ssl_context(ctx.path)
+                x509.valid(credential.path)
+                kwargs["verify"] = self._get_ssl_context(credential.path)
             except FileNotFoundError as err:
+                raise AuthRequiredError(
+                    credential.idp,
+                    "X.509 certificate has not been issued.",
+                ) from err
+            except (OSError, ValueError) as err:
                 raise AuthContextError(
-                    self.config.active, f"x509 cert {ctx.path} does not exist."
+                    credential.idp,
+                    "X.509 certificate cannot be used.",
                 ) from err
             return kwargs
         return kwargs
+
+    def _get_event_hooks(
+        self,
+        *,
+        asynchronous: bool,
+        credential: AuthenticationCredential | None,
+    ) -> dict[str, list[Any]]:
+        """Build native HTTPX2 hooks from the shared transport policy."""
+        catcher = errors.acatch if asynchronous else errors.catch
+        request_logger = debug.arequest if asynchronous else debug.request
+        response_logger = debug.aresponse if asynchronous else debug.response
+        request_hooks: list[Any] = []
+        if credential is not None:
+            if isinstance(credential, OIDCCredential):
+                request_hooks.append(
+                    auth.arefresh(self) if asynchronous else auth.refresh(self)
+                )
+            request_hooks.append(
+                expiry.acheck(self) if asynchronous else expiry.check(self)
+            )
+        request_hooks.append(request_logger)
+        response_hooks = [response_logger]
+        if self.raise_http_errors:
+            response_hooks.append(catcher)
+        return {"request": request_hooks, "response": response_hooks}
 
     def _get_ssl_context(self, source: Path) -> ssl.SSLContext:
         """Get SSL context from certificate file.
@@ -303,30 +532,39 @@ class HTTPClient(BaseSettings):
         ctx.load_cert_chain(certfile=certfile)
         return ctx
 
-    def _get_http_headers(self) -> dict[str, str]:
+    def _get_http_headers(
+        self,
+        *,
+        credential: AuthenticationCredential | None,
+    ) -> dict[str, str]:
         """Generate HTTP headers for the client based on authentication mode.
+
+        Args:
+            credential: Pre-resolved Authentication Record for this client build.
 
         Returns:
             dict[str, str]: HTTP headers.
         """
-        ctx: AuthContext = self.config.context
         headers: dict[str, str] = {
             "Content-Type": "application/x-www-form-urlencoded",
             "Accept": "application/json",
-            "Date": asctime(gmtime()),
+            "Date": formatdate(usegmt=True),
             "User-Agent": f"python-canfar/{__version__}",
         }
 
-        if self.token:
+        if _has_runtime_token(self.token):
+            assert self.token is not None
             headers["Authorization"] = f"Bearer {self.token.get_secret_value()}"
             headers["X-Skaha-Authentication-Type"] = "RUNTIME-TOKEN"
-        elif self.certificate:
+        elif self.certificate is not None:
             headers["X-Skaha-Authentication-Type"] = "RUNTIME-X509"
-        elif ctx.mode == "oidc":
-            assert ctx.valid, "Invalid OIDC context provided."
-            headers["Authorization"] = f"Bearer {ctx.token.access}"
+        elif isinstance(credential, OIDCCredential):
+            if credential.token.access is not None:
+                headers["Authorization"] = (
+                    f"Bearer {credential.token.access.get_secret_value()}"
+                )
             headers["X-Skaha-Authentication-Type"] = "OIDC"
-        elif ctx.mode == "x509":
+        elif isinstance(credential, X509Credential):
             headers["X-Skaha-Authentication-Type"] = "X509"
         # Add container registry authentication if configured
         if self.config.registry.username:
@@ -335,19 +573,8 @@ class HTTPClient(BaseSettings):
         return headers
 
     # Context Manager Methods
-    @contextmanager
-    def _session(self) -> Iterator[Client]:
-        """Sync context."""
-        log.debug("Entering synchronous session context")
-        try:
-            yield self.client
-        finally:
-            log.debug("Exiting synchronous session context")
-            self._close()
-
     def __enter__(self) -> Self:
         """Sync context manager entry."""
-        log.debug("Entering synchronous context manager")
         return self
 
     def __exit__(
@@ -357,32 +584,16 @@ class HTTPClient(BaseSettings):
         exc_tb: TracebackType | None,
     ) -> None:
         """Sync context manager exit."""
-        log.debug("Exiting synchronous context manager")
         self._close()
 
     def _close(self) -> None:
         """Close sync client."""
-        if self._client:
-            log.debug("Closing synchronous HTTPx client")
-            self._client.close()
-            self._client = None
-            log.debug("Synchronous HTTPx client closed")
-        else:
-            log.debug("No synchronous client to close")
-
-    @asynccontextmanager
-    async def _asession(self) -> AsyncIterator[AsyncClient]:
-        """Async context."""
-        log.debug("Entering asynchronous session context")
-        try:
-            yield self.asynclient
-        finally:
-            log.debug("Exiting asynchronous session context")
-            await self._aclose()
+        client, self._client = self._client, None
+        if client is not None:
+            client.close()
 
     async def __aenter__(self) -> Self:
         """Async context manager entry."""
-        log.debug("Entering asynchronous context manager")
         return self
 
     async def __aexit__(
@@ -392,23 +603,10 @@ class HTTPClient(BaseSettings):
         exc_tb: TracebackType | None,
     ) -> None:
         """Async context manager exit."""
-        log.debug("Exiting asynchronous context manager")
         await self._aclose()
 
     async def _aclose(self) -> None:
         """Close async client."""
-        if self._asynclient:
-            log.debug("Closing asynchronous HTTPx client")
-            await self._asynclient.aclose()
-            self._asynclient = None
-            log.debug("Asynchronous HTTPx client closed")
-        else:
-            log.debug("No asynchronous client to close")
-
-    def __del__(self) -> None:
-        """Cleanup on deletion."""
-        log.debug("HTTPClient instance being deleted - cleaning up clients")
-        # Sync session cleanup
-        self._client = None
-        # Async session cleanup
-        self._asynclient = None
+        client, self._asynclient = self._asynclient, None
+        if client is not None:
+            await client.aclose()

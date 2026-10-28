@@ -3,11 +3,93 @@
 import pytest
 from pydantic import ValidationError
 
-from canfar.models.http import Connection, Server
+from canfar.models.http import (
+    ResourceRange,
+    Server,
+    ServerResources,
+    SessionResources,
+    VOSpaceService,
+)
+
+_LIMIT_RANGE_CONTEXT = {
+    "cores": {
+        "default": 1,
+        "defaultRequest": 1,
+        "defaultLimit": 2,
+        "options": list(range(1, 35)),
+    },
+    "memoryGB": {
+        "default": 2,
+        "defaultRequest": 2,
+        "defaultLimit": 4,
+        "options": list(range(1, 385)),
+    },
+    "gpus": {"options": []},
+    "maxInteractiveSessions": 5,
+}
+"""Context payload from a Server that derives limits from a LimitRange."""
+
+
+class TestVOSpaceService:
+    """Test VOSpace Service configuration."""
+
+    def test_serializes_registry_uri_and_http_endpoint(self) -> None:
+        """A VOSpace Service carries only its registry URI and base URL."""
+        service = VOSpaceService(
+            uri="ivo://cadc.nrc.ca/arc",
+            url="https://ws-cadc.canfar.net/arc",
+        )
+
+        assert service.model_dump(mode="json") == {
+            "uri": "ivo://cadc.nrc.ca/arc",
+            "url": "https://ws-cadc.canfar.net/arc",
+        }
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"uri": "not-a-url", "url": "https://ws-cadc.canfar.net/arc"},
+            {"uri": "ivo://cadc.nrc.ca/arc", "url": "vos://example.com/arc"},
+            {"url": "https://ws-cadc.canfar.net/arc"},
+            {"uri": "ivo://cadc.nrc.ca/arc"},
+        ],
+    )
+    def test_requires_valid_registry_uri_and_http_endpoint(self, payload: dict) -> None:
+        """Both VOSpace Service identifiers are required and validated."""
+        with pytest.raises(ValidationError):
+            VOSpaceService.model_validate(payload)
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://ws-cadc.canfar.net/arc/capabilities",
+            "https://ws-cadc.canfar.net/arc/capabilities/",
+        ],
+    )
+    def test_rejects_capabilities_endpoint_as_base_url(self, url: str) -> None:
+        """A VOSpace Service URL names the base service, not capabilities."""
+        with pytest.raises(ValidationError, match="must not end with /capabilities"):
+            VOSpaceService(uri="ivo://cadc.nrc.ca/arc", url=url)
 
 
 class TestServer:
     """Test Server class."""
+
+    def test_model_ignores_environment_and_has_no_network_methods(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Persisted Server data comes only from validated input."""
+        monkeypatch.setenv("CANFAR_SERVER_NAME", "Environment Server")
+        monkeypatch.setenv("CANFAR_SERVER_RESOURCES", '{"sessions": 64}')
+
+        server = Server()
+
+        assert server.name is None
+        assert server.resources is None
+        assert not hasattr(server, "capabilities")
+        assert not hasattr(server, "fetch")
+        assert not hasattr(server, "afetch")
 
     def test_default_values(self) -> None:
         """Test default values for Server."""
@@ -16,6 +98,7 @@ class TestServer:
         assert server.uri is None
         assert server.url is None
         assert server.version is None
+        assert server.storage == {}
 
     def test_with_all_values(self) -> None:
         """Test Server with all custom values."""
@@ -97,6 +180,9 @@ class TestServer:
         server = Server(version="v123")
         assert server.version == "v123"
 
+        server = Server(version="v2.1")
+        assert server.version == "v2.1"
+
         server = Server(version="v9999999")  # Max length test
         assert server.version == "v9999999"
 
@@ -141,133 +227,100 @@ class TestServer:
         assert str(server.url) == "https://services.swesrc.chalmers.se/skaha"
 
 
-class TestConnection:
-    """Test Connection class."""
+class TestServerResources:
+    """Test Session resource limits read from context payloads."""
 
-    def test_default_values(self) -> None:
-        """Test default values for Connection."""
-        connection = Connection()
-        assert connection.concurrency == 32
-        assert connection.timeout == 30
+    def test_reads_flexible_and_fixed_limits_from_context(self) -> None:
+        """Flexible spans request to limit; fixed spans the offered options."""
+        resources = ServerResources.from_context(_LIMIT_RANGE_CONTEXT)
 
-    def test_with_custom_values(self) -> None:
-        """Test Connection with custom values."""
-        connection = Connection(concurrency=64, timeout=60)
-        assert connection.concurrency == 64
-        assert connection.timeout == 60
+        assert resources.model_dump() == {
+            "flexible": {"cores": {"min": 1, "max": 2}, "ram": {"min": 2, "max": 4}},
+            "fixed": {"cores": {"min": 1, "max": 34}, "ram": {"min": 1, "max": 384}},
+            "gpus": {"min": 0, "max": 0},
+            "sessions": 5,
+        }
 
-    def test_concurrency_validation(self) -> None:
-        """Test concurrency field validation."""
-        # Valid values
-        connection = Connection(concurrency=1)  # Minimum
-        assert connection.concurrency == 1
-
-        connection = Connection(concurrency=256)  # Maximum
-        assert connection.concurrency == 256
-
-        connection = Connection(concurrency=128)  # Middle value
-        assert connection.concurrency == 128
-
-        # Invalid values
-        with pytest.raises(ValidationError):
-            Connection(concurrency=0)  # Too low
-
-        with pytest.raises(ValidationError):
-            Connection(concurrency=257)  # Too high
-
-    def test_timeout_validation(self) -> None:
-        """Test timeout field validation."""
-        # Valid values
-        connection = Connection(timeout=1)  # Minimum (greater than 0)
-        assert connection.timeout == 1
-
-        connection = Connection(timeout=300)  # Maximum
-        assert connection.timeout == 300
-
-        connection = Connection(timeout=150)  # Middle value
-        assert connection.timeout == 150
-
-        # Invalid values
-        with pytest.raises(ValidationError):
-            Connection(timeout=0)  # Not greater than 0
-
-        with pytest.raises(ValidationError):
-            Connection(timeout=-1)  # Negative
-
-        with pytest.raises(ValidationError):
-            Connection(timeout=301)  # Too high
-
-    def test_model_config_settings(self) -> None:
-        """Test model configuration settings."""
-        # Test that extra fields are forbidden
-        with pytest.raises(ValidationError):
-            Connection(invalid_field="value")
-
-    def test_inheritance_compatibility(self) -> None:
-        """Test that Connection can be used as a base class."""
-        # This tests that Connection works properly as a base class
-        # (as it's used by Configuration)
-
-        class TestConfig(Connection):
-            extra_field: str = "test"
-
-        config = TestConfig()
-        assert config.concurrency == 32  # Inherited default
-        assert config.timeout == 30  # Inherited default
-        assert config.extra_field == "test"
-
-        config = TestConfig(concurrency=16, timeout=45)
-        assert config.concurrency == 16
-        assert config.timeout == 45
-
-    def test_settings_config_dict(self) -> None:
-        """Test that settings configuration is properly applied."""
-        # Test environment variable prefix and other settings
-        connection = Connection()
-
-        # Verify the model config is set correctly
-        assert connection.model_config["env_prefix"] == "CANFAR_CONNECTION_"
-        assert connection.model_config["case_sensitive"] is False
-        assert connection.model_config["extra"] == "forbid"
-
-
-class TestServerAndConnectionIntegration:
-    """Test integration between Server and Connection classes."""
-
-    def test_both_classes_have_compatible_configs(self) -> None:
-        """Test that both classes have compatible model configurations."""
-        server = Server()
-        connection = Connection()
-
-        # Both should forbid extra fields
-        assert server.model_config["extra"] == "forbid"
-        assert connection.model_config["extra"] == "forbid"
-
-        # Both should be case insensitive
-        assert server.model_config["case_sensitive"] is False
-        assert connection.model_config["case_sensitive"] is False
-
-        # Both should strip whitespace
-        assert server.model_config["str_strip_whitespace"] is True
-        assert connection.model_config["str_strip_whitespace"] is True
-
-    def test_realistic_server_configuration(self) -> None:
-        """Test a realistic server configuration."""
-        server = Server(
-            name="CANFAR",
-            uri="ivo://cadc.nrc.ca/skaha",
-            url="https://ws-uv.canfar.net/skaha",
-            version="v0",
+    def test_reads_file_based_context_with_sparse_options(self) -> None:
+        """File-based contexts may send sparse options and a quoted Session count."""
+        resources = ServerResources.from_context(
+            {
+                "cores": {
+                    "defaultRequest": 1,
+                    "defaultLimit": 8,
+                    "options": [16, 1, 2],
+                },
+                "memoryGB": {
+                    "defaultRequest": 4,
+                    "defaultLimit": 32,
+                    "options": [1, 2, 4, 192],
+                },
+                "gpus": {"options": [1, 2, 28]},
+                "maxInteractiveSessions": "5",
+            }
         )
 
-        assert server.name == "CANFAR"
-        assert str(server.uri) == "ivo://cadc.nrc.ca/skaha"
-        assert str(server.url) == "https://ws-uv.canfar.net/skaha"
-        assert server.version == "v0"
+        assert resources.fixed == SessionResources(
+            cores=ResourceRange(min=1, max=16),
+            ram=ResourceRange(min=1, max=192),
+        )
+        assert resources.gpus == ResourceRange(min=1, max=28)
+        assert resources.sessions == 5
 
-    def test_realistic_connection_configuration(self) -> None:
-        """Test a realistic connection configuration."""
-        connection = Connection(concurrency=16, timeout=120)
+    def test_missing_or_malformed_values_stay_unknown(self) -> None:
+        """Older platforms produce partial resources instead of invented defaults."""
+        resources = ServerResources.from_context(
+            {
+                "cores": {"defaultRequest": 8, "defaultLimit": 2, "options": [1, 2]},
+                "memoryGB": {"defaultRequest": 2, "defaultLimit": 20, "options": []},
+                "maxInteractiveSessions": 0,
+            }
+        )
 
-        assert connection.concurrency == 16
-        assert connection.timeout == 120
+        assert resources == ServerResources(
+            flexible=SessionResources(ram=ResourceRange(min=2, max=20)),
+            fixed=SessionResources(cores=ResourceRange(min=1, max=2)),
+        )
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {},
+            {"error": "not found"},
+            {
+                "cores": {"default-request": 1, "default-limit": 16},
+                "memory": {"options-gb": [1, 2, 4]},
+            },
+        ],
+        ids=["empty", "unrelated", "pre-2024-keys"],
+    )
+    def test_rejects_payloads_without_recognizable_limits(self, payload: dict) -> None:
+        """A payload with no recognizable limit is not usable resources."""
+        with pytest.raises(ValueError, match="no recognizable resource limits"):
+            ServerResources.from_context(payload)
+
+    @pytest.mark.parametrize(
+        "bounds",
+        [{"min": 3, "max": 2}, {"min": -1, "max": 2}, {"min": 1}],
+    )
+    def test_range_rejects_invalid_bounds(self, bounds: dict) -> None:
+        """Ranges are inclusive, non-negative, and need both bounds."""
+        with pytest.raises(ValidationError):
+            ResourceRange.model_validate(bounds)
+
+    def test_server_round_trips_resources_and_omits_unknown_values(self) -> None:
+        """Saved configuration omits unknown limits and reloads the same model."""
+        server = Server(
+            name="canSRC",
+            resources=ServerResources(gpus=ResourceRange(min=0, max=0), sessions=5),
+        )
+
+        saved = server.model_dump(mode="json", exclude_none=True)
+
+        assert saved["resources"] == {
+            "flexible": {},
+            "fixed": {},
+            "gpus": {"min": 0, "max": 0},
+            "sessions": 5,
+        }
+        assert Server.model_validate(saved) == server

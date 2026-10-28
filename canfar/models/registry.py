@@ -1,65 +1,20 @@
 """Registry and discovery-related models for Canfar API.
 
-This module contains Pydantic models related to server discovery,
-registry search configuration, and server information.
+This module contains Pydantic models related to server discovery and
+server information.
 """
 
 from __future__ import annotations
 
 from base64 import b64encode
+from typing import Literal
 
-from pydantic import AnyHttpUrl, BaseModel, Field, model_validator
+from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
-
-class IVOARegistrySearch(BaseModel):
-    """Configuration model for server discovery settings."""
-
-    registries: dict[str, str] = Field(
-        default={
-            "https://spsrc27.iaa.csic.es/reg/resource-caps": "SRCnet",
-            "https://ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/reg/resource-caps": "CADC",
-            (
-                "https://rc-ws.cadc-ccda.hia-iha.nrc-cnrc.gc.ca/reg/resource-caps"
-            ): "CADC@keel-dev",
-        }
-    )
-
-    names: dict[str, str] = Field(
-        default={
-            "ivo://canfar.net/src/skaha": "Canada",
-            "ivo://swesrc.chalmers.se/skaha": "Sweden",
-            "ivo://canfar.cam.uksrc.org/skaha": "UK-CAM",
-            "ivo://canfar.ral.uksrc.org/skaha": "UK-RAL",
-            "ivo://src.skach.org/skaha": "Switzerland",
-            "ivo://espsrc.iaa.csic.es/skaha": "Spain",
-            "ivo://canfar.itsrc.oact.inaf.it/skaha": "Italy-INAF",
-            "ivo://shion-sp.mtk.nao.ac.jp/skaha": "Japan",
-            "ivo://canfar.krsrc.kr/skaha": "Korea",
-            "ivo://canfar.ska.zverse.space/skaha": "China",
-            "ivo://canfar.itsrc.ext.cineca.it/skaha": "Italy-CINECA",
-            "ivo://canfar.srcnet.skao.int/skaha": "SKAO",
-            "ivo://aussrc.org/skaha": "Australia",
-            "ivo://cadc.nrc.ca/skaha": "CANFAR",
-        }
-    )
-
-    omit: list[tuple[str, str]] = Field(
-        default=[("CADC", "ivo://canfar.net/src/skaha")]
-    )
-
-    excluded: tuple[str, ...] = Field(
-        default=(
-            "dev",
-            "development",
-            "test",
-            "demo",
-            "stage",
-            "staging",
-            "rc-",
-            "preprod",
-        )
-    )
+ProbeStatus = Literal["pending", "connected", "timeout", "unreachable", "error"]
+"""Discovery state of one Science Platform Server; every state but ``pending``
+is an outcome."""
 
 
 class IVOARegistry(BaseModel):
@@ -67,6 +22,8 @@ class IVOARegistry(BaseModel):
 
     name: str
     content: str
+    source: str | None = None
+    development: bool = False
     success: bool = True
     error: str | None = None
 
@@ -75,37 +32,38 @@ class Server(BaseModel):
     """Model to store Canfar Server endpoint information."""
 
     registry: str
+    development: bool = False
     uri: str
     url: str
     status: int | None = None
+    failure: Literal["timeout", "unreachable"] | None = None
     name: str | None = None
 
 
-class ServerResults(BaseModel):
-    """Model for complete discovery results."""
+class ServerProbe(BaseModel):
+    """Discovery state of one Science Platform Server.
 
-    endpoints: list[Server] = Field(default_factory=list)
-    total_time: float = 0.0
-    registry_fetch_time: float = 0.0
-    endpoint_check_time: float = 0.0
-    found: int = 0
-    checked: int = 0
-    successful: int = 0
+    Discovery reports each Server as ``pending`` once the registries list it,
+    then again with its outcome.
 
-    def add(self, endpoint: Server) -> None:
-        """Add an endpoint to results."""
-        self.endpoints.append(endpoint)
-        if endpoint.status == 200:
-            self.successful += 1
+    Attributes:
+        name: Server Name discovery gives the endpoint.
+        uri: IVOA URI from the registry.
+        url: Endpoint URL from the registry.
+        status: ``pending`` while discovery checks the Server; ``connected``
+            when its session capabilities were read; otherwise why discovery
+            could not use it.
+        detail: Short reason for a ``timeout``, ``unreachable``, or ``error``
+            outcome.
+    """
 
-    def get_by_registry(self) -> dict[str, list[Server]]:
-        """Group endpoints by registry."""
-        results: dict[str, list[Server]] = {}
-        for endpoint in self.endpoints:
-            if endpoint.registry not in results:
-                results[endpoint.registry] = []
-            results[endpoint.registry].append(endpoint)
-        return results
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    uri: str
+    url: str
+    status: ProbeStatus
+    detail: str | None = None
 
 
 class ContainerRegistry(BaseModel):

@@ -1,0 +1,437 @@
+"""Public Session.create request and failure contracts."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
+
+import httpx2
+import pytest
+from pydantic import SecretStr, ValidationError
+
+from canfar.exceptions.session import SessionRequestError
+from canfar.models.session import CreateRequest
+from canfar.sessions import AsyncSession, Session
+
+_BASE_URL = "https://example.test/skaha/v1/"
+_SERIALIZED_REQUEST = [
+    ("name", "batch-1"),
+    ("image", "images.canfar.net/custom/image:latest"),
+    ("cores", "2"),
+    ("ram", "4"),
+    ("type", "headless"),
+    ("gpus", "1"),
+    ("cmd", "python"),
+    ("args", "-m worker"),
+    ("env", "A=1"),
+    ("env", "REPLICA_ID=1"),
+    ("env", "REPLICA_COUNT=2"),
+]
+_SERIALIZED_REQUEST_REPLICA_TWO = [
+    ("name", "batch-2"),
+    ("image", "images.canfar.net/custom/image:latest"),
+    ("cores", "2"),
+    ("ram", "4"),
+    ("type", "headless"),
+    ("gpus", "1"),
+    ("cmd", "python"),
+    ("args", "-m worker"),
+    ("env", "A=1"),
+    ("env", "REPLICA_ID=2"),
+    ("env", "REPLICA_COUNT=2"),
+]
+_FAILURE_CASES = (
+    pytest.param({"batch-2"}, ["batch-1-id"], id="partial"),
+    pytest.param({"batch-1", "batch-2"}, [], id="total"),
+)
+_INVALID_REQUEST_CASES = (
+    pytest.param(
+        {"kind": "invalid", "image": "skaha/terminal:latest"},
+        id="invalid-kind",
+    ),
+    pytest.param(
+        {
+            "kind": "notebook",
+            "image": "skaha/terminal:latest",
+            "cmd": "python",
+        },
+        id="notebook-command",
+    ),
+    pytest.param(
+        {"kind": "headless", "image": "skaha/terminal:latest", "replicas": 0},
+        id="zero-replicas",
+    ),
+    pytest.param(
+        {
+            "kind": "headless",
+            "image": "skaha/terminal:latest",
+            "replicas": 513,
+        },
+        id="too-many-replicas",
+    ),
+)
+
+
+def _create_request() -> CreateRequest:
+    """Return one deterministic two-replica request."""
+    return CreateRequest(
+        name="batch",
+        image="custom/image:latest",
+        cores=2,
+        ram=4,
+        kind="headless",
+        gpus=1,
+        cmd="python",
+        args="-m worker",
+        env={"A": "1"},
+        replicas=2,
+    )
+
+
+def _create_responder(sent: list[list[tuple[str, str]]]):
+    """Return a transport handler that records and identifies replicas."""
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        params = request.url.params.multi_items()
+        sent.append(params)
+        name = request.url.params["name"]
+        return httpx2.Response(200, text=f"{name}-id\n", request=request)
+
+    return respond
+
+
+def test_sync_create_serializes_the_public_request_contract() -> None:
+    """Sync create serializes every replica through the HTTP boundary."""
+    sent: list[list[tuple[str, str]]] = []
+    real_client = httpx2.Client
+    with (
+        patch(
+            "canfar.client.Client",
+            side_effect=lambda **kwargs: real_client(
+                transport=httpx2.MockTransport(_create_responder(sent)),
+                **kwargs,
+            ),
+        ),
+        Session(token=SecretStr("token"), url=_BASE_URL) as session,
+    ):
+        assert session.create(_create_request()) == ["batch-1-id", "batch-2-id"]
+
+    assert sent[0] == _SERIALIZED_REQUEST
+    assert sent[1] == _SERIALIZED_REQUEST_REPLICA_TWO
+
+
+@pytest.mark.asyncio
+async def test_async_create_serializes_the_public_request_contract() -> None:
+    """Async create serializes every replica through the HTTP boundary."""
+    sent: list[list[tuple[str, str]]] = []
+    real_async_client = httpx2.AsyncClient
+    with patch(
+        "canfar.client.AsyncClient",
+        side_effect=lambda **kwargs: real_async_client(
+            transport=httpx2.MockTransport(_create_responder(sent)),
+            **kwargs,
+        ),
+    ):
+        async with AsyncSession(token=SecretStr("token"), url=_BASE_URL) as session:
+            assert await session.create(_create_request()) == [
+                "batch-1-id",
+                "batch-2-id",
+            ]
+
+    assert sent[0] == _SERIALIZED_REQUEST
+    assert sent[1] == _SERIALIZED_REQUEST_REPLICA_TWO
+
+
+@pytest.mark.asyncio
+async def test_async_create_waits_for_connection_pool_capacity(
+    monkeypatch: pytest.MonkeyPatch, tmp_path
+) -> None:
+    """Queued replicas reach a real server even when the batch exceeds timeout."""
+    monkeypatch.setattr("canfar.models.config.CONFIG_PATH", tmp_path / "config.yaml")
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    monkeypatch.setenv("no_proxy", "127.0.0.1")
+    received: list[str] = []
+    active = 0
+    peak_active = 0
+
+    async def respond(
+        reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        nonlocal active, peak_active
+        try:
+            headers = await reader.readuntil(b"\r\n\r\n")
+            target = headers.split(b" ", 2)[1].decode()
+            name = parse_qs(urlsplit(target).query)["name"][0]
+            received.append(name)
+            active += 1
+            peak_active = max(peak_active, active)
+            # Each response fits timeout=1; the third replica's pool wait does not.
+            await asyncio.sleep(0.65)
+            body = f"{name}-id".encode()
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: "
+                + str(len(body)).encode()
+                + b"\r\n\r\n"
+                + body
+            )
+            await writer.drain()
+            active -= 1
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    server = await asyncio.start_server(respond, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    async with (
+        server,
+        AsyncSession(
+            token=SecretStr("test-token"),
+            url=f"http://127.0.0.1:{port}/",
+            concurrency=1,
+            timeout=1,
+        ) as session,
+    ):
+        ids = await asyncio.wait_for(
+            session.create(name="batch", image="skaha/terminal:latest", replicas=4),
+            timeout=10,
+        )
+
+    assert ids == [f"batch-{replica}-id" for replica in range(1, 5)]
+    assert sorted(received) == [f"batch-{replica}" for replica in range(1, 5)]
+    assert peak_active == 1
+
+
+def _failure_responder(failed_names: set[str]):
+    """Return a transport handler for partial or total replica failures."""
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        name = request.url.params["name"]
+        if name in failed_names:
+            if len(failed_names) == 1:
+                message = "connection refused"
+                raise httpx2.ConnectError(message, request=request)
+            response = httpx2.Response(503, request=request)
+            message = "service unavailable"
+            raise httpx2.HTTPStatusError(
+                message,
+                request=request,
+                response=response,
+            )
+        return httpx2.Response(200, text=f"{name}-id\n", request=request)
+
+    return respond
+
+
+@pytest.mark.parametrize(
+    ("failed_names", "expected"),
+    _FAILURE_CASES,
+)
+def test_sync_create_omits_failed_replicas(
+    failed_names: set[str], expected: list[str]
+) -> None:
+    """Sync create omits failed replicas and returns an empty total failure."""
+    request = CreateRequest(
+        name="batch", image="skaha/terminal:latest", kind="headless", replicas=2
+    )
+    real_client = httpx2.Client
+    with (
+        patch(
+            "canfar.client.Client",
+            side_effect=lambda **kwargs: real_client(
+                transport=httpx2.MockTransport(_failure_responder(failed_names)),
+                **kwargs,
+            ),
+        ),
+        Session(token=SecretStr("token"), url=_BASE_URL) as session,
+    ):
+        assert session.create(request) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failed_names", "expected"),
+    _FAILURE_CASES,
+)
+async def test_async_create_omits_failed_replicas(
+    failed_names: set[str], expected: list[str]
+) -> None:
+    """Async create omits failed replicas and returns an empty total failure."""
+    request = CreateRequest(
+        name="batch", image="skaha/terminal:latest", kind="headless", replicas=2
+    )
+    real_async_client = httpx2.AsyncClient
+    with patch(
+        "canfar.client.AsyncClient",
+        side_effect=lambda **kwargs: real_async_client(
+            transport=httpx2.MockTransport(_failure_responder(failed_names)),
+            **kwargs,
+        ),
+    ):
+        async with AsyncSession(token=SecretStr("token"), url=_BASE_URL) as session:
+            assert await session.create(request) == expected
+
+
+@pytest.mark.parametrize(
+    "request_kwargs",
+    _INVALID_REQUEST_CASES,
+)
+def test_sync_create_rejects_invalid_requests(
+    request_kwargs: dict[str, object],
+) -> None:
+    """Invalid create requests fail before the synchronous HTTP boundary."""
+    with (
+        Session(token=SecretStr("token"), url="https://example.test") as session,
+        pytest.raises(ValidationError),
+    ):
+        session.create(name="batch", **request_kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "request_kwargs",
+    _INVALID_REQUEST_CASES,
+)
+async def test_async_create_rejects_invalid_requests(
+    request_kwargs: dict[str, object],
+) -> None:
+    """Invalid create requests fail before the asynchronous HTTP boundary."""
+    with pytest.raises(ValidationError):
+        async with AsyncSession(
+            token=SecretStr("token"), url="https://example.test"
+        ) as session:
+            await session.create(name="batch", **request_kwargs)
+
+
+def _failure_log_responder(request: httpx2.Request) -> httpx2.Response:
+    """Raise one safe-to-log HTTP failure for a create request."""
+    response = httpx2.Response(500, request=request, text="no capacity")
+    message = "server error"
+    raise httpx2.HTTPStatusError(message, request=request, response=response)
+
+
+def _assert_safe_create_log(caplog: pytest.LogCaptureFixture, secret: str) -> None:
+    """Assert create logs only stable replica context and exception type."""
+    logged = caplog.text
+    assert secret not in logged
+    assert "no capacity" not in logged
+    assert "server error" not in logged
+    assert "Failed to create session" in logged
+    assert "replica 1/1" in logged
+    assert "HTTPStatusError" in logged
+
+
+def test_sync_create_failure_logs_only_safe_replica_context(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Sync create omits request payload and raw exception from logs."""
+    environment_secret = "sync-create-environment-secret"
+    caplog.set_level(logging.ERROR, logger="canfar.sessions")
+    real_client = httpx2.Client
+    with (
+        patch(
+            "canfar.client.Client",
+            side_effect=lambda **kwargs: real_client(
+                transport=httpx2.MockTransport(_failure_log_responder),
+                **kwargs,
+            ),
+        ),
+        Session(token=SecretStr("token"), url=_BASE_URL) as session,
+    ):
+        assert (
+            session.create(
+                name="test-name",
+                image="images.example/net/img:latest",
+                kind="headless",
+                env={"ACCESS_TOKEN": environment_secret},
+                replicas=1,
+            )
+            == []
+        )
+
+    _assert_safe_create_log(caplog, environment_secret)
+
+
+@pytest.mark.asyncio
+async def test_async_create_failure_logs_only_safe_replica_context(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Async create omits request payload and raw exception from logs."""
+    environment_secret = "async-create-environment-secret"
+    caplog.set_level(logging.ERROR, logger="canfar.sessions")
+    real_async_client = httpx2.AsyncClient
+    with patch(
+        "canfar.client.AsyncClient",
+        side_effect=lambda **kwargs: real_async_client(
+            transport=httpx2.MockTransport(_failure_log_responder),
+            **kwargs,
+        ),
+    ):
+        async with AsyncSession(token=SecretStr("token"), url=_BASE_URL) as session:
+            assert (
+                await session.create(
+                    name="test-name",
+                    image="images.example/net/img:latest",
+                    kind="headless",
+                    env={"REFRESH_TOKEN": environment_secret},
+                    replicas=1,
+                )
+                == []
+            )
+
+    _assert_safe_create_log(caplog, environment_secret)
+
+
+def test_sync_create_errors_raise_policy() -> None:
+    """Sync create raises SessionRequestError under errors='raise'."""
+    request = CreateRequest(
+        name="batch", image="skaha/terminal:latest", kind="headless", replicas=2
+    )
+    real_client = httpx2.Client
+    with (
+        patch(
+            "canfar.client.Client",
+            side_effect=lambda **kwargs: real_client(
+                transport=httpx2.MockTransport(_failure_responder({"batch-2"})),
+                **kwargs,
+            ),
+        ),
+        Session(token=SecretStr("token"), url=_BASE_URL) as session,
+    ):
+        with pytest.raises(SessionRequestError) as exc_info:
+            session.create(request, errors="raise")
+        assert exc_info.value.operation == "create"
+        assert exc_info.value.results == ["batch-1-id"]
+        assert 2 in exc_info.value.errors
+        assert isinstance(exc_info.value.errors[2], httpx2.ConnectError)
+        assert exc_info.value.__cause__ is exc_info.value.errors[2]
+
+
+@pytest.mark.asyncio
+async def test_async_create_errors_raise_policy() -> None:
+    """Async create raises SessionRequestError under errors='raise'."""
+    request = CreateRequest(
+        name="batch", image="skaha/terminal:latest", kind="headless", replicas=2
+    )
+    real_async_client = httpx2.AsyncClient
+    with patch(
+        "canfar.client.AsyncClient",
+        side_effect=lambda **kwargs: real_async_client(
+            transport=httpx2.MockTransport(_failure_responder({"batch-2"})),
+            **kwargs,
+        ),
+    ):
+        async with AsyncSession(
+            token=SecretStr("token"), url=_BASE_URL, errors="raise"
+        ) as session:
+            with pytest.raises(SessionRequestError) as exc_info:
+                await session.create(request)
+            assert exc_info.value.operation == "create"
+            assert exc_info.value.results == ["batch-1-id"]
+            assert 2 in exc_info.value.errors
+            assert isinstance(exc_info.value.errors[2], httpx2.ConnectError)
+            assert exc_info.value.__cause__ is exc_info.value.errors[2]
+
+            # Override with ignore
+            assert await session.create(request, errors="ignore") == ["batch-1-id"]

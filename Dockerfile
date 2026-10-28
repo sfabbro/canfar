@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
 
 # renovate: datasource=docker depName=ghcr.io/astral-sh/uv versioning=semver
-FROM ghcr.io/astral-sh/uv:alpine AS uv
+FROM ghcr.io/astral-sh/uv:alpine@sha256:95f501aef734a5aaf167ff0640e02f215dcc7043ff48685de70328e5c55a57b0 AS uv
 
 # renovate: datasource=docker depName=python versioning=python
-FROM python:alpine AS builder
+FROM python:alpine@sha256:9e9fde4d32eedce0b661d9ab91e826b62dddf28e928c230ec55f1866cac66b01 AS builder
 
 WORKDIR /build
 
@@ -18,7 +18,7 @@ RUN uv build --wheel --out-dir /dist \
     && uv pip install --prefix=/install /dist/*.whl
 
 # renovate: datasource=docker depName=python versioning=python
-FROM python:alpine AS runtime
+FROM python:alpine@sha256:9e9fde4d32eedce0b661d9ab91e826b62dddf28e928c230ec55f1866cac66b01 AS production
 
 LABEL org.opencontainers.image.title="CANFAR Python CLI" \
       org.opencontainers.image.description="CLI for CANFAR Science Platform" \
@@ -31,7 +31,5 @@ COPY --from=builder /install /usr/local
 HEALTHCHECK --interval=1s --timeout=15s --retries=3 --start-period=1s \
     CMD ["canfar", "--help"]
 
-CMD ["canfar"]
-
-# Backward-compatible alias used by CI/CD workflows.
-FROM runtime AS production
+ENTRYPOINT ["canfar"]
+CMD ["--help"]

@@ -2,216 +2,162 @@
 
 from __future__ import annotations
 
-import asyncio
+import logging
 import time
+from urllib.parse import urlsplit, urlunsplit
 
-import httpx
-from typing_extensions import Self
+from httpx2 import AsyncClient, HTTPError, Timeout, TimeoutException
 
-from canfar.models.registry import (
-    IVOARegistry,
-    IVOARegistrySearch,
-    Server,
-    ServerResults,
+from canfar.models.registry import IVOARegistry, Server
+
+log = logging.getLogger(__name__)
+
+NAMES: dict[str, str] = {
+    "ivo://canfar.net/src/skaha": "canSRC",
+    "ivo://swesrc.chalmers.se/skaha": "sweSRC",
+    "ivo://canfar.cam.uksrc.org/skaha": "ukCAM",
+    "ivo://canfar.ral.uksrc.org/skaha": "ukRAL",
+    "ivo://src.skach.org/skaha": "chSRC",
+    "ivo://espsrc.iaa.csic.es/skaha": "espSRC",
+    "ivo://canfar.itsrc.oact.inaf.it/skaha": "itaINAF",
+    "ivo://shion-sp.mtk.nao.ac.jp/skaha": "jpSRC",
+    "ivo://canfar.krsrc.kr/skaha": "krSRC",
+    "ivo://canfar.ska.zverse.space/skaha": "cnSRC",
+    "ivo://canfar.itsrc.ext.cineca.it/skaha": "itCINECA",
+    "ivo://canfar.srcnet.skao.int/skaha": "skaSRC",
+    "ivo://aussrc.org/skaha": "ausSRC",
+    "ivo://cadc.nrc.ca/skaha": "canfar",
+}
+"""Server Names for known Science Platform URIs."""
+
+OMIT = frozenset({("CADC", "ivo://canfar.net/src/skaha")})
+"""(registry name, URI) records that discovery skips."""
+
+DEVELOPMENT_MARKERS = (
+    "dev",
+    "development",
+    "test",
+    "demo",
+    "stage",
+    "staging",
+    "rc-",
+    "preprod",
 )
-from canfar.utils import display
-from canfar.utils.console import console
+"""URI or URL fragments that mark a development record."""
 
 
-class Discover:
-    """Optimized server discovery with single HTTP client and Pydantic models."""
-
-    def __init__(
-        self, config: IVOARegistrySearch, timeout: int = 2, max_connections: int = 100
-    ) -> None:
-        """Initialize with configuration and connection limits."""
-        self.config = config
-        self.timeout = timeout
-
-        # Single HTTP client for all operations
-        self.client = httpx.AsyncClient(
-            timeout=httpx.Timeout(timeout),
-            limits=httpx.Limits(
-                max_keepalive_connections=max_connections,
-                max_connections=max_connections,
-                keepalive_expiry=30.0,
-            ),
-            http2=True,
-            follow_redirects=True,
-        )
-
-        self.console = console
-
-    async def __aenter__(self) -> Self:
-        """Async context manager entry method.
-
-        Returns:
-            Discover: The instance of this class.
-        """
-        return self
-
-    async def __aexit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: object,
-    ) -> None:
-        """Async context manager exit method - cleans up HTTP client.
-
-        Args:
-            exc_type: The exception type if an exception was raised in the context.
-            exc_val: The exception value if an exception was raised in the context.
-            exc_tb: The traceback if an exception was raised in the context.
-        """
-        await self.client.aclose()
-
-    async def fetch(self, url: str, name: str) -> IVOARegistry:
-        """Fetch registry contents.
-
-        Args:
-            url (str): Registry URL.
-            name (str): Common name for the registry.
-
-        Returns:
-            RegistryInfo: Registry information.
-        """
-        try:
-            start_time = time.time()
-            response = await self.client.get(url)
-            response.raise_for_status()
-            elapsed = time.time() - start_time
-            self.console.print(f"[dim]Fetched {name} in {elapsed:.2f}s[/dim]")
-
-            return IVOARegistry(name=name, content=response.text, success=True)
-        except (httpx.HTTPError, httpx.TimeoutException, httpx.RequestError) as error:
-            error_msg = str(error)
-            self.console.print(f"[red]Failed to fetch {name}: {error_msg}[/red]")
-            return IVOARegistry(name=name, content="", success=False, error=error_msg)
-
-    async def extract(self, registry: IVOARegistry, dev: bool = False) -> list[Server]:
-        """Extract capabilities endpoints from registry content asynchronously."""
-        if not registry.success or not registry.content:
-            return []
-
-        endpoints: list[Server] = []
-
-        for entry in registry.content.splitlines():
-            line = entry.strip()
-            if line.startswith("#") or not line or "=" not in line:
-                continue
-
-            uri, url = line.split("=", 1)
-            uri, url = uri.strip(), url.strip()
-
-            if url.endswith("/skaha/capabilities") and uri.endswith("/skaha"):
-                url = url.replace("/capabilities", "")
-                # Apply exclusion filters
-                if not dev and any(
-                    word in uri.lower() or word in url.lower()
-                    for word in self.config.excluded
-                ):
-                    continue
-
-                # Apply omit filters
-                if (registry.name, uri) in self.config.omit:
-                    continue
-                endpoint = Server(
-                    registry=registry.name,
-                    uri=uri,
-                    url=url,
-                    name=self.config.names.get(uri),
-                )
-                endpoints.append(endpoint)
-
-        return endpoints
-
-    async def check(self, endpoint: Server) -> Server:
-        """Check endpoint status using HEAD request."""
-        try:
-            response = await self.client.head(endpoint.url)
-            endpoint.status = response.status_code
-        except (httpx.HTTPError, httpx.TimeoutException):
-            endpoint.status = None
-        return endpoint
-
-    async def servers(self, dev: bool = False) -> ServerResults:
-        """Discover all servers with maximum parallelization."""
-        results = ServerResults()
-        start_time = time.time()
-
-        # Step 1: Fetch all registries in parallel
-        registry_start = time.time()
-        if dev:
-            self.console.print("[dim] Retrieving dev registries...[/dim]")
-            registry_tasks = [
-                self.fetch(url, name) for url, name in self.config.registries.items()
-            ]
-        else:
-            registry_tasks = [
-                self.fetch(url, name)
-                for url, name in self.config.registries.items()
-                if "dev" not in name.lower()
-            ]
-        registry_results = await asyncio.gather(*registry_tasks)
-        results.registry_fetch_time = time.time() - registry_start
-
-        # Step 2: Extract all endpoints from all registries
-        all_endpoints: list[Server] = []
-        for registry_result in registry_results:
-            endpoints = await self.extract(registry_result, dev)
-            all_endpoints.extend(endpoints)
-        results.found = len(all_endpoints)
-
-        if not all_endpoints:
-            results.total_time = time.time() - start_time
-            return results
-
-        # Step 3: Check all endpoints in parallel using single client
-        check_start = time.time()
-        checked_endpoints = await asyncio.gather(
-            *[self.check(endpoint) for endpoint in all_endpoints]
-        )
-        results.endpoint_check_time = time.time() - check_start
-
-        # Step 4: Add all endpoints to results
-        for endpoint in checked_endpoints:
-            results.add(endpoint)
-
-        results.checked = len(checked_endpoints)
-        results.total_time = time.time() - start_time
-
-        self.console.print(
-            f"[bold green]Discovery completed in {results.total_time:.2f}s "
-            f"({results.successful}/{results.checked} active)[/bold green]"
-        )
-
-        return results
+def client(timeout: int) -> AsyncClient:
+    """Return the HTTP client that registry fetches and checks share."""
+    return AsyncClient(timeout=Timeout(timeout), http2=True, follow_redirects=True)
 
 
-async def servers(
-    dev: bool = False,
-    dead: bool = False,
-    details: bool = False,
-    timeout: int = 3,
-) -> Server:
-    """Find and select a Canfar Server.
+async def fetch(
+    http: AsyncClient,
+    url: str,
+    name: str,
+    *,
+    development: bool = False,
+) -> IVOARegistry:
+    """Fetch registry contents.
 
     Args:
-        dev: Include development servers. Defaults to False.
-        dead: Show only inactive endpoints (status=None). Defaults to False.
-        details: Show detailed URI and URL information. Defaults to False.
-        timeout: HTTP request timeout. Defaults to 2.
+        http: Shared discovery HTTP client.
+        url: Registry URL.
+        name: Common name for the registry.
+        development: Whether this source contains development records.
 
     Returns:
-        ServerInfo: The selected server info.
+        IVOARegistry: Registry contents, or the error when the fetch failed.
     """
-    config = IVOARegistrySearch()
+    try:
+        start_time = time.time()
+        response = await http.get(url)
+        response.raise_for_status()
+        log.info("Fetched %s in %.2fs", name, time.time() - start_time)
+    except HTTPError as error:
+        return IVOARegistry(
+            name=name,
+            source=url,
+            development=development,
+            content="",
+            success=False,
+            error=str(error),
+        )
+    return IVOARegistry(
+        name=name,
+        source=url,
+        development=development,
+        content=response.text,
+    )
 
-    async with Discover(config, timeout=timeout, max_connections=100) as discovery:
-        results = await discovery.servers(dev=dev)
-        return await display.servers(results, show_dead=dead, show_details=details)
+
+def extract(
+    registry: IVOARegistry,
+    *,
+    leaf: str | None,
+    dev: bool = False,
+) -> list[Server]:
+    """Extract Science Platform and preferred VOSpace registry records.
+
+    Args:
+        registry: Fetched registry contents.
+        leaf: Preferred VOSpace URI leaf for the Identity Provider.
+        dev: Keep development records.
+
+    Returns:
+        list[Server]: Science Platform (``skaha``) and ``leaf`` records.
+    """
+    if not registry.success:
+        return []
+
+    endpoints: list[Server] = []
+    for entry in registry.content.splitlines():
+        line = entry.strip()
+        if line.startswith("#") or "=" not in line:
+            continue
+
+        uri, url = (part.strip() for part in line.split("=", 1))
+        record_leaf = uri.rpartition("/")[2]
+        if record_leaf not in {"skaha", leaf}:
+            continue
+        base = _without_terminal_capabilities(url)
+        if base is None or (registry.name, uri) in OMIT:
+            continue
+        development = any(
+            marker in uri.lower() or marker in base.lower()
+            for marker in DEVELOPMENT_MARKERS
+        )
+        if development and not dev:
+            continue
+        endpoints.append(
+            Server(
+                registry=registry.source or registry.name,
+                development=registry.development or development,
+                uri=uri,
+                url=base,
+                name=NAMES.get(uri) if record_leaf == "skaha" else None,
+            )
+        )
+    return endpoints
 
 
-if __name__ == "__main__":
-    # Test with active endpoints and details
-    server = asyncio.run(servers())
+async def check(http: AsyncClient, endpoint: Server) -> Server:
+    """Record the endpoint's ``HEAD`` status, or why no response arrived."""
+    try:
+        response = await http.head(endpoint.url)
+        endpoint.status = response.status_code
+    except TimeoutException:
+        endpoint.status = None
+        endpoint.failure = "timeout"
+    except HTTPError:
+        endpoint.status = None
+        endpoint.failure = "unreachable"
+    return endpoint
+
+
+def _without_terminal_capabilities(url: str) -> str | None:
+    """Remove only a terminal ``/capabilities`` path component."""
+    parsed = urlsplit(url)
+    if not parsed.path.endswith("/capabilities"):
+        return None
+    return urlunsplit(parsed._replace(path=parsed.path.removesuffix("/capabilities")))

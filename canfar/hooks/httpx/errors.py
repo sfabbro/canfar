@@ -1,165 +1,138 @@
-"""Module for providing httpx event hooks to log error responses.
+"""Module for providing httpx2 event hooks to log error responses.
 
-When using httpx event hooks, especially for 'response' events, it's crucial
-to explicitly read the response body using `response.read()` (for synchronous
-clients) or `await response.aread()` (for asynchronous clients) *before*
-attempting to access `response.text` or calling `response.raise_for_status()`.
-
-This is because:
-1. `response.text`, `response.content`, `response.json()`, etc., are typically
-   populated only after the response body has been read.
-2. Event hooks are often called before httpx automatically reads the response
-   body for these attributes or methods.
-3. Therefore, to ensure that `response.text` (or other content attributes)
-   is available for logging in the event hook, especially when an error
-   occurs and `response.raise_for_status()` is called, the body must be
-   read first within the hook itself. Failing to do so might result in
-   empty or incomplete information being logged.
+When using httpx2 event hooks for 'response' events, the response body is read
+inside the error-handling context so that body-download errors (e.g.
+ReadTimeout during streaming) are warning-logged alongside status errors.
 """
 
-import httpx
+import contextlib
+import logging
+from collections.abc import Generator
 
-from canfar import get_logger
-
-log = get_logger(__name__)
-
-CONN_ERR_MSG = (
-    "Failed to establish connection within the timeout period. "
-    "The server may be unreachable or not responding."
-)
-READ_ERR_MSG = (
-    "Failed to receive response within the timeout period. "
-    "The server may be overloaded or not responding."
-)
-WRITE_ERR_MSG = (
-    "Failed to send request within the timeout period. "
-    "There may be network issues or the server is not accepting requests."
-)
-POOL_ERR_MSG = (
-    "Failed to acquire a connection from the pool within the timeout period. "
-    "All connections are currently in use."
+from httpx2 import (
+    ConnectTimeout,
+    HTTPStatusError,
+    PoolTimeout,
+    ReadTimeout,
+    RequestError,
+    Response,
+    TimeoutException,
+    WriteTimeout,
 )
 
+from canfar.utils.logging import safe_url
 
-def catch(response: httpx.Response) -> None:
-    """Reads the response body and raises HTTPStatusError for error responses.
+log = logging.getLogger(__name__)
 
-    Handles various httpx exceptions with informative error messages:
-    - Timeout exceptions (ConnectTimeout, ReadTimeout, WriteTimeout, PoolTimeout)
-      are caught and logged with specific timeout information
-    - HTTP status errors (4xx, 5xx) are logged with response details
-    - Other request errors are caught and logged generally
+_TIMEOUT_MESSAGES: dict[type[TimeoutException], str] = {
+    ConnectTimeout: (
+        "Failed to establish connection within the timeout period. "
+        "The server may be unreachable or not responding."
+    ),
+    ReadTimeout: (
+        "Failed to receive response within the timeout period. "
+        "The server may be overloaded or not responding."
+    ),
+    WriteTimeout: (
+        "Failed to send request within the timeout period. "
+        "There may be network issues or the server is not accepting requests."
+    ),
+    PoolTimeout: (
+        "Failed to acquire a connection from the pool within the timeout period. "
+        "All connections are currently in use."
+    ),
+}
 
-    Args:
-        response: An httpx.Response object.
+
+def _request_url(error: RequestError) -> str:
+    try:
+        request = error.request
+    except RuntimeError:
+        return "unknown"
+    return safe_url(request.url)
+
+
+@contextlib.contextmanager
+def _error_handling() -> Generator[None, None, None]:
+    """Context manager that logs and re-raises httpx2 errors.
+
+    Wraps both the body-read and ``raise_for_status()`` calls so that errors
+    from either step are warning-logged.  Use as::
+
+        with _error_handling():
+            response.read()  # or await response.aread()
+            response.raise_for_status()
 
     Raises:
-        httpx.TimeoutException: When a timeout occurs during the request
-        httpx.HTTPStatusError: When the response has an error status code
-        httpx.RequestError: For other request-related errors
+        httpx2.ConnectTimeout: on connect timeout.
+        httpx2.ReadTimeout: on read timeout.
+        httpx2.WriteTimeout: on write timeout.
+        httpx2.PoolTimeout: on pool timeout.
+        httpx2.HTTPStatusError: on 4xx/5xx status.
+        httpx2.RequestError: for other request errors.
     """
     try:
+        yield
+    except tuple(_TIMEOUT_MESSAGES) as err:
+        log.warning(
+            "%s URL: %s",
+            _TIMEOUT_MESSAGES[type(err)],
+            _request_url(err),
+            exc_info=False,
+        )
+        raise
+    except HTTPStatusError as err:
+        log.warning(
+            "HTTP %d error for %s %s",
+            err.response.status_code,
+            err.request.method,
+            safe_url(err.request.url),
+            exc_info=False,
+        )
+        raise
+    except RequestError as err:
+        log.warning(
+            "Request error for %s (%s)",
+            _request_url(err),
+            type(err).__name__,
+            exc_info=False,
+        )
+        raise
+
+
+def catch(response: Response) -> None:
+    """Read the response body and raise HTTPStatusError for error responses.
+
+    Args:
+        response: An httpx2.Response object.
+
+    Raises:
+        httpx2.ConnectTimeout: on connect timeout.
+        httpx2.ReadTimeout: on read timeout (body download or raise_for_status).
+        httpx2.WriteTimeout: on write timeout.
+        httpx2.PoolTimeout: on pool timeout.
+        httpx2.HTTPStatusError: on 4xx/5xx status.
+        httpx2.RequestError: for other request errors.
+    """
+    with _error_handling():
         response.read()
         response.raise_for_status()
-    except httpx.ConnectTimeout as err:
-        log.exception(
-            "%s URL: %s",
-            CONN_ERR_MSG,
-            err.request.url,
-        )
-        raise
-    except httpx.ReadTimeout as err:
-        log.exception(
-            "%s URL: %s",
-            READ_ERR_MSG,
-            err.request.url,
-        )
-        raise
-    except httpx.WriteTimeout as err:
-        log.exception(
-            "%s URL: %s",
-            WRITE_ERR_MSG,
-            err.request.url,
-        )
-        raise
-    except httpx.PoolTimeout as err:
-        log.exception(
-            "%s URL: %s",
-            POOL_ERR_MSG,
-            err.request.url,
-        )
-        raise
-    except httpx.HTTPStatusError as err:
-        log.exception(
-            "HTTP %d error for %s %s: %s",
-            err.response.status_code,
-            err.request.method,
-            err.request.url,
-            err.response.text if err.response.text else "No response body",
-        )
-        raise
-    except httpx.RequestError:
-        log.exception("Request Error", stack_info=True, stacklevel=1)
-        raise
 
 
-async def acatch(response: httpx.Response) -> None:
-    """Reads the response body and raises HTTPStatusError for error responses (async).
-
-    Handles various httpx exceptions with informative error messages:
-    - Timeout exceptions (ConnectTimeout, ReadTimeout, WriteTimeout, PoolTimeout)
-      are caught and logged with specific timeout information
-    - HTTP status errors (4xx, 5xx) are logged with response details
-    - Other request errors are caught and logged generally
+async def acatch(response: Response) -> None:
+    """Read the response body and raise HTTPStatusError for error responses (async).
 
     Args:
-        response: An httpx.Response object.
+        response: An httpx2.Response object.
 
     Raises:
-        httpx.TimeoutException: When a timeout occurs during the request
-        httpx.HTTPStatusError: When the response has an error status code
-        httpx.RequestError: For other request-related errors
+        httpx2.ConnectTimeout: on connect timeout.
+        httpx2.ReadTimeout: on read timeout (body download or raise_for_status).
+        httpx2.WriteTimeout: on write timeout.
+        httpx2.PoolTimeout: on pool timeout.
+        httpx2.HTTPStatusError: on 4xx/5xx status.
+        httpx2.RequestError: for other request errors.
     """
-    try:
+    with _error_handling():
         await response.aread()
         response.raise_for_status()
-    except httpx.ConnectTimeout as err:
-        log.exception(
-            "%s URL: %s",
-            CONN_ERR_MSG,
-            err.request.url,
-        )
-        raise
-    except httpx.ReadTimeout as err:
-        log.exception(
-            "%s URL: %s",
-            READ_ERR_MSG,
-            err.request.url,
-        )
-        raise
-    except httpx.WriteTimeout as err:
-        log.exception(
-            "%s URL: %s",
-            WRITE_ERR_MSG,
-            err.request.url,
-        )
-        raise
-    except httpx.PoolTimeout as err:
-        log.exception(
-            "%s URL: %s",
-            POOL_ERR_MSG,
-            err.request.url,
-        )
-        raise
-    except httpx.HTTPStatusError as err:
-        log.exception(
-            "HTTP %d error for %s %s: %s",
-            err.response.status_code,
-            err.request.method,
-            err.request.url,
-            err.response.text if err.response.text else "No response body",
-        )
-        raise
-    except httpx.RequestError:
-        log.exception("Request Error", stack_info=True, stacklevel=1)
-        raise

@@ -6,52 +6,47 @@ import asyncio
 from typing import Annotated
 
 import typer
+from rich.errors import MarkupError
 
 from canfar.sessions import AsyncSession
-from canfar.utils.console import console
-
-logs = typer.Typer(
-    name="logs",
-    help="Get logs for sessions.",
-    no_args_is_help=True,
-)
+from canfar.utils.console import emit_cli_active_server_banner, get_console
 
 
-@logs.callback(invoke_without_command=True)
 def get_logs(
     session_ids: Annotated[
         list[str],
         typer.Argument(help="One or more session IDs."),
     ],
-    debug: Annotated[
-        bool,
-        typer.Option(
-            "--debug",
-            help="Enable debug logging.",
-        ),
-    ] = False,
 ) -> None:
     """Get logs from the science platform server."""
+    emit_cli_active_server_banner()
 
     async def _get_logs() -> None:
-        log_level = "DEBUG" if debug else "INFO"
-        async with AsyncSession(loglevel=log_level) as session:
+        """Fetch logs for the requested sessions and render them."""
+        async with AsyncSession(errors="ignore") as session:
             try:
                 all_logs = await session.logs(ids=session_ids)
             except Exception as e:
-                console.print(f"[bold red]Error:[/bold red] Could not fetch logs. {e}")
+                get_console(stderr=True).print(
+                    f"[bold red]Error:[/bold red] Could not fetch logs. {e}"
+                )
                 raise typer.Exit(1) from e
 
         if not all_logs:
-            console.print(
+            get_console(stderr=True).print(
                 "[yellow]No logs found for the specified session(s).[/yellow]"
             )
             return
 
         for session_id, log_text in all_logs.items():
+            console = get_console()
             console.print(
                 f"\n[bold magenta] Logs for session {session_id} [/bold magenta]\n"
             )
-            console.print(log_text)
+            try:
+                rendered_logs = console.render_str(log_text)
+            except MarkupError:
+                rendered_logs = console.render_str(log_text, markup=False)
+            console.print(rendered_logs)
 
     asyncio.run(_get_logs())

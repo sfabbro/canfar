@@ -6,50 +6,71 @@ import json
 
 import typer
 import yaml
-from pydantic import BaseModel
+from pydantic_settings.exceptions import SettingsError
 
 from canfar import CONFIG_PATH
-from canfar.hooks.typer.aliases import AliasGroup
+from canfar.cli import output
+from canfar.cli.machine import OutputOption, resolve_mode
+from canfar.config.migration import ConfigResetRequiredError
+from canfar.errors import ErrorCode, StructuredError
 from canfar.models.config import Configuration
-from canfar.utils.console import console
+from canfar.utils.console import emit_cli_active_server_banner, get_console
 
-config: typer.Typer = typer.Typer(
-    cls=AliasGroup,
-)
+config: typer.Typer = typer.Typer()
 
 
-@config.command("show | list | ls")
-def show() -> None:
-    """Displays the current configuration."""
+def _configuration_failure(error: Exception) -> StructuredError:
+    """Convert an expected persisted-configuration failure."""
+    if isinstance(error, ConfigResetRequiredError):
+        return output.boundary_failure(error)
+    return StructuredError(
+        code=ErrorCode.CONFIG_INVALID,
+        message=f"Configuration could not be loaded: {error}",
+        hint="Check the configuration file and retry.",
+    )
+
+
+@config.command("show", help="Display client configuration")
+def show(
+    output_format: OutputOption = None,
+) -> None:
+    """Display client configuration."""
+    mode = resolve_mode(output_format)
+    if mode is output.OutputMode.HUMAN:
+        emit_cli_active_server_banner()
     try:
-        cfg = Configuration()
-        exists: bool = CONFIG_PATH.exists()
-        msg = f"{'discovered' if exists else 'does not exist, showing defaults.'}"
-        console.print(f"[dim]{CONFIG_PATH} {msg}[/dim]")
-        console.print(
-            cfg.model_dump(
-                mode="python",
-                exclude_none=True,
-            )
+        cfg = Configuration()  # ty: ignore[missing-argument]
+    except (
+        ConfigResetRequiredError,
+        OSError,
+        SettingsError,
+        ValueError,
+        yaml.YAMLError,
+    ) as error:
+        output.fail(_configuration_failure(error), mode)
+
+    if not CONFIG_PATH.exists():
+        get_console(stderr=True).print(
+            f"[yellow]{CONFIG_PATH} does not exist, showing defaults.[/yellow]"
         )
-    except Exception as error:
-        console.print(f"[bold red]Error: {error}[/bold red]")
-        raise typer.Exit(1) from error
+    if mode is not output.OutputMode.HUMAN:
+        output.to_stdout(cfg.model_dump(mode="json", exclude_none=False), mode)
+        return
+
+    if CONFIG_PATH.exists():
+        get_console().print(f"[dim]{CONFIG_PATH} discovered[/dim]")
+    get_console().print(
+        cfg.model_dump(
+            mode="python",
+            exclude_none=True,
+        )
+    )
 
 
 def _format_value(value: object) -> str:
-    """Format a value for display.
-
-    Args:
-        value (object): Value to format.
-
-    Returns:
-        str: Formatted value.
-    """
-    if isinstance(value, BaseModel):
-        return json.dumps(value.model_dump(mode="json", exclude_none=True), indent=2)
+    """Format a JSON-safe config value for human display."""
     if isinstance(value, (dict, list)):
-        return json.dumps(value, indent=2, default=str)
+        return json.dumps(value, indent=2)
     if value is None:
         return "null"
     return str(value)
@@ -61,19 +82,44 @@ def get(
         ...,
         help="Config key to get in dot notation.",
     ),
+    output_format: OutputOption = None,
 ) -> None:
     """Retrieve a config value.
 
     canfar config get console.width
-    canfar config get contexts.active
+    canfar config get active.server
+    canfar config get servers.canfar.url
     """
+    mode = resolve_mode(output_format)
+    if mode is output.OutputMode.HUMAN:
+        emit_cli_active_server_banner()
     try:
-        cfg = Configuration()
-        value = cfg.get_value(key)
-        typer.echo(_format_value(value))
+        cfg = Configuration()  # ty: ignore[missing-argument]
+    except (
+        ConfigResetRequiredError,
+        OSError,
+        SettingsError,
+        ValueError,
+        yaml.YAMLError,
+    ) as err:
+        output.fail(_configuration_failure(err), mode)
+
+    try:
+        value = cfg.editor.get(key)
     except (AttributeError, KeyError, IndexError, TypeError, ValueError) as err:
-        console.print(f"[bold red]Error:[/bold red] {err}")
-        raise typer.Exit(1) from err
+        output.fail(
+            StructuredError(
+                code=ErrorCode.COMMAND_VALIDATION_FAILED,
+                message=f"Configuration key '{key}' could not be read.",
+                hint=str(err),
+            ),
+            mode,
+        )
+
+    if mode is not output.OutputMode.HUMAN:
+        output.to_stdout(value, mode)
+        return
+    typer.echo(_format_value(value))
 
 
 @config.command("set")
@@ -84,19 +130,22 @@ def set_value(
     """Set a config value.
 
     canfar config set console.width 130
-    canfar config set contexts.active default
+    canfar config set active.authentication cadc
+    canfar config set servers.canfar.url https://ws-uv.canfar.net/skaha
     """
-    cfg = Configuration()
+    emit_cli_active_server_banner()
+    cfg = Configuration()  # ty: ignore[missing-argument]
     try:
         parsed = yaml.safe_load(value)
-        updated = cfg.set_value(key, parsed)
-        updated.save()
+        cfg.editor.set(key, parsed)
+        cfg.editor.save()
     except (AttributeError, KeyError, IndexError, TypeError, ValueError) as err:
-        console.print(f"[bold red]Error:[/bold red] {err}")
+        get_console(stderr=True).print(f"[bold red]Error:[/bold red] {err}")
         raise typer.Exit(1) from err
 
 
-@config.command("path")
+@config.command("path", help="Local path of config")
 def path() -> None:
-    """Displays the path to the configuration file."""
-    console.print(f"[green]{CONFIG_PATH}[/green]")
+    """Local path of config."""
+    emit_cli_active_server_banner()
+    get_console().print(f"[green]{CONFIG_PATH}[/green]")

@@ -5,30 +5,31 @@ from __future__ import annotations
 import platform
 import sys
 from importlib import metadata
+from typing import Annotated
 
 import typer
 from rich.table import Table
 
 from canfar import __version__
-from canfar.utils.console import console
+from canfar.utils.console import emit_cli_active_server_banner, get_console
 
 
 def callback(
-    debug: bool = typer.Option(
-        default=False,
-        flag_value="--debug",
-        is_flag=True,
-        help="Show detailed information for bug reports.",
-    ),
+    debug: Annotated[
+        bool, typer.Option("--debug", help="Show detailed information for bug reports.")
+    ] = False,
 ) -> None:
     """CANFAR Python Client version information."""
+    emit_cli_active_server_banner()
     if not debug:
         # Simple version output
-        console.print(f"CANFAR Python Client {__version__}")
+        get_console().print(f"CANFAR Python Client {__version__}")
         raise typer.Exit(0)
 
     # Detailed debug information
-    console.print("\n[bold blue]CANFAR Python Client Debug Information[/bold blue]")
+    get_console().print(
+        "\n[bold blue]CANFAR Python Client Debug Information[/bold blue]"
+    )
 
     # Client Information
     table = Table(show_header=False, box=None, padding=(0, 1))
@@ -53,46 +54,37 @@ def callback(
     table.add_row("Architecture", platform.machine())
     table.add_row("Platform", platform.platform())
 
-    console.print(table)
+    get_console().print(table)
 
     # Key Dependencies
-    console.print("\n[bold blue]Key Dependencies[/bold blue]")
+    get_console().print("\n[bold blue]Key Dependencies[/bold blue]")
     deps_table = Table(show_header=True, box=None)
     deps_table.add_column("Package", style="bold green", width=22)
     deps_table.add_column("Version", style="white")
 
     # Core dependencies that are most likely to cause issues
     key_deps = [
-        "httpx",
+        "httpx2",
         "typer",
         "rich",
         "pydantic",
-        "cadcutils",
     ]
 
     for dep in key_deps:
         version_str = _get_package_version(dep)
         deps_table.add_row(dep, version_str)
 
-    console.print(deps_table)
+    get_console().print(deps_table)
 
     # Additional information
-    console.print("\n[bold blue]Additional Information[/bold blue]")
-    console.print("• Repository: https://github.com/opencadc/canfar")
-    console.print("• Issues: https://github.com/opencadc/canfar/issues")
-    console.print("• Documentation: https://opencadc.github.io/canfar/")
-    console.print("\n[dim]Please include this information when reporting bugs.[/dim]")
+    get_console().print("\n[bold blue]Additional Information[/bold blue]")
+    get_console().print("• Repository: https://github.com/opencadc/canfar")
+    get_console().print("• Issues: https://github.com/opencadc/canfar/issues")
+    get_console().print("• Documentation: https://opencadc.github.io/canfar/")
+    get_console().print(
+        "\n[dim]Please include this information when reporting bugs.[/dim]"
+    )
     raise typer.Exit(0)
-
-
-version = typer.Typer(
-    name="version",
-    help="Show canfar client version information",
-    no_args_is_help=False,
-    rich_help_panel="Information Commands",
-    callback=callback,
-    invoke_without_command=True,
-)
 
 
 def _get_package_version(name: str) -> str:
@@ -117,20 +109,13 @@ def _get_installation_info() -> str:
         str: Installation method information.
     """
     try:
-        # Check if we can find the package metadata
         dist = metadata.distribution("canfar")
-        if not dist.files:
-            return "unknown"
-
-        # Check if installed in development mode
-        is_development = False
-        for file in dist.files:
-            if str(file).endswith(".egg-link") or "site-packages" not in str(file):
-                is_development = True
-                break
-
-        if is_development:
-            return "development/editable"
-        return "pip/wheel"  # noqa: TRY300
     except metadata.PackageNotFoundError:
         return "development (not installed)"
+    if not dist.files:
+        return "unknown"
+    development = any(
+        str(file).endswith(".egg-link") or "site-packages" not in str(file)
+        for file in dist.files
+    )
+    return "development/editable" if development else "pip/wheel"

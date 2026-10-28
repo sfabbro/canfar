@@ -2,12 +2,78 @@
 
 from __future__ import annotations
 
+import json
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import httpx2
 import pytest
+import yaml
+from rich.text import Text
 from typer.testing import CliRunner
 
 from canfar.cli.main import cli
+from canfar.models.config import Configuration
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
 
 runner = CliRunner()
+
+_SESSION_KEYS = frozenset(
+    {
+        "id",
+        "userid",
+        "runAsUID",
+        "runAsGID",
+        "supplementalGroups",
+        "appid",
+        "image",
+        "type",
+        "status",
+        "name",
+        "startTime",
+        "expiryTime",
+        "connectURL",
+        "requestedRAM",
+        "requestedCPUCores",
+        "requestedGPUCores",
+        "ramInUse",
+        "gpuRAMInUse",
+        "cpuCoresInUse",
+        "gpuUtilization",
+        "isFixedResources",
+    }
+)
+
+
+def _session_payload(
+    session_id: str,
+    *,
+    status: str = "Running",
+    kind: str = "headless",
+    **extra: object,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "id": session_id,
+        "name": session_id,
+        "type": kind,
+        "status": status,
+        "isFixedResources": True,
+    }
+    payload.update(extra)
+    return payload
+
+
+def _patch_config(path: Path):
+    return patch("canfar.models.config.CONFIG_PATH", path)
+
+
+def _mock_async_session(mock_session_cls: MagicMock) -> AsyncMock:
+    mock_session = AsyncMock()
+    mock_session_cls.return_value.__aenter__.return_value = mock_session
+    return mock_session
 
 
 def test_stats_command_help() -> None:
@@ -16,10 +82,249 @@ def test_stats_command_help() -> None:
     assert result.exit_code == 0
 
 
-def test_ps_command_help() -> None:
-    """Test ps command help executes successfully."""
+def test_ps_help_describes_default_status_filter() -> None:
+    """Test ps help names the statuses shown by the default filter."""
     result = runner.invoke(cli, ["ps", "--help"])
+
     assert result.exit_code == 0
+    help_text = " ".join(Text.from_ansi(result.output).plain.replace("│", " ").split())
+    assert "default shows Pending and Running" in help_text
+
+
+def test_ps_outputs_running_table_and_debug_anomalies() -> None:
+    """Test ps table rendering with debug anomaly output."""
+    payloads = [
+        {
+            "id": "running-1",
+            "name": "run",
+            "type": "headless",
+            "status": "Running",
+            "image": "images.canfar.net/skaha/terminal:latest",
+            "startTime": "2025-01-01T00:00:00Z",
+            "isFixedResources": True,
+            "supplementalGroups": ["bad-group"],
+        },
+        {
+            "id": "done-1",
+            "name": "done",
+            "type": "headless",
+            "status": "Completed",
+            "image": "images.canfar.net/skaha/terminal:latest",
+            "startTime": "2025-01-02T00:00:00Z",
+            "isFixedResources": True,
+        },
+    ]
+
+    with patch("canfar.cli.ps.AsyncSession") as session_cls:
+        session = _mock_async_session(session_cls)
+        session.fetch.return_value = payloads
+        result = runner.invoke(cli, ["ps", "--debug"])
+
+    assert result.exit_code == 0
+    assert "running-1" in result.stdout
+    assert "done-1" not in result.stdout
+    assert "Session Response Warnings" in result.stderr
+    session.fetch.assert_awaited_once_with(kind=None, status=None)
+
+
+def test_ps_quiet_prints_all_matching_session_ids() -> None:
+    """Test ps quiet mode prints every matching session ID."""
+    payloads = [
+        {
+            "id": "running-1",
+            "name": "run",
+            "type": "headless",
+            "status": "Running",
+            "isFixedResources": True,
+        },
+        {
+            "id": "done-1",
+            "name": "done",
+            "type": "headless",
+            "status": "Completed",
+            "isFixedResources": True,
+        },
+        {
+            "id": "running-2",
+            "name": "run-2",
+            "type": "headless",
+            "status": "Running",
+            "isFixedResources": True,
+        },
+    ]
+
+    with patch("canfar.cli.ps.AsyncSession") as session_cls:
+        session = _mock_async_session(session_cls)
+        session.fetch.return_value = payloads
+        result = runner.invoke(cli, ["ps", "--quiet"])
+
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    assert lines[0].startswith("@")
+    assert lines[1:] == ["running-1", "running-2"]
+
+    with patch("canfar.cli.ps.AsyncSession") as session_cls:
+        session = _mock_async_session(session_cls)
+        session.fetch.return_value = payloads
+        result = runner.invoke(cli, ["ps", "--quiet", "--all"])
+
+    assert result.exit_code == 0
+    lines = result.stdout.splitlines()
+    assert lines[0].startswith("@")
+    assert lines[1:] == ["running-1", "done-1", "running-2"]
+
+
+@pytest.mark.parametrize(
+    ("flag", "load"),
+    [
+        (["-o", "json"], json.loads),
+        (["--output", "yaml"], yaml.safe_load),
+    ],
+)
+def test_ps_machine_emits_filtered_session_array(
+    tmp_path: Path,
+    flag: list[str],
+    load: Callable[[str], object],
+) -> None:
+    """Machine ``ps`` emits validated session models with running-only filtering."""
+    config_path = tmp_path / "config.yaml"
+    payloads = [
+        _session_payload("running-1", status="Running"),
+        _session_payload("done-1", status="Completed"),
+    ]
+
+    with (
+        _patch_config(config_path),
+        patch("canfar.cli.ps.AsyncSession") as session_cls,
+    ):
+        session = _mock_async_session(session_cls)
+        session.fetch.return_value = payloads
+        result = runner.invoke(cli, ["ps", *flag])
+
+    assert result.exit_code == 0
+    assert not result.stdout.startswith("@")
+    data = load(result.stdout)
+    assert isinstance(data, list)
+    assert [item["id"] for item in data] == ["running-1"]
+    assert all(set(item) == _SESSION_KEYS for item in data)
+
+
+def test_ps_json_kind_filter_parity(tmp_path: Path) -> None:
+    """``ps --kind`` applies the same API filter in machine output mode."""
+    config_path = tmp_path / "config.yaml"
+    payloads = [
+        _session_payload("headless-1", kind="headless"),
+        _session_payload("notebook-1", kind="notebook"),
+    ]
+
+    with (
+        _patch_config(config_path),
+        patch("canfar.cli.ps.AsyncSession") as session_cls,
+    ):
+        session = _mock_async_session(session_cls)
+        session.fetch.return_value = [payloads[0]]
+        result = runner.invoke(cli, ["ps", "--kind", "headless", "--output", "json"])
+
+    assert result.exit_code == 0
+    session.fetch.assert_awaited_once_with(kind="headless", status=None)
+    data = json.loads(result.stdout)
+    assert [item["id"] for item in data] == ["headless-1"]
+    assert all(item["type"] == "headless" for item in data)
+
+
+def test_ps_json_malformed_payload_keeps_stdout_pure(tmp_path: Path) -> None:
+    """Malformed payloads warn on stderr; stdout stays a pure JSON array."""
+    config_path = tmp_path / "config.yaml"
+    payloads: list[object] = [
+        _session_payload("running-1", status="Running"),
+        "garbage-not-a-mapping",
+    ]
+
+    with (
+        _patch_config(config_path),
+        patch("canfar.cli.ps.AsyncSession") as session_cls,
+    ):
+        session = _mock_async_session(session_cls)
+        session.fetch.return_value = payloads
+        result = runner.invoke(cli, ["ps", "--output", "json"])
+
+    assert result.exit_code == 0
+    data = json.loads(result.stdout)
+    assert isinstance(data, list)
+    assert [item["id"] for item in data] == ["running-1"]
+    assert "validation error" in result.stderr.lower()
+
+
+def test_ps_quiet_with_machine_output_exits_two() -> None:
+    """``ps --quiet`` is incompatible with machine output."""
+    result = runner.invoke(cli, ["ps", "--quiet", "--output", "json"])
+    assert result.exit_code == 2
+    assert "quiet" in result.stderr.lower()
+
+
+def test_ps_allows_empty_running_view() -> None:
+    """Test ps reports empty running view when only completed sessions exist."""
+    with patch("canfar.cli.ps.AsyncSession") as session_cls:
+        session = _mock_async_session(session_cls)
+        session.fetch.return_value = [
+            {
+                "id": "done",
+                "name": "done",
+                "type": "headless",
+                "status": "Completed",
+                "isFixedResources": True,
+            },
+        ]
+        result = runner.invoke(cli, ["ps"])
+
+    assert result.exit_code == 0
+    assert "No pending or running sessions found" in result.stderr
+
+
+def test_stats_outputs_cluster_tables() -> None:
+    """Test stats renders cluster table data."""
+    with patch("canfar.cli.stats.AsyncSession") as session_cls:
+        session = _mock_async_session(session_cls)
+        session.stats.return_value = {
+            "instances": {"desktopApp": 2, "notebook": 3, "total": 5},
+            "cores": {"requestedCPUCores": 4, "cpuCoresAvailable": 64},
+            "ram": {"requestedRAM": "8Gi", "ramAvailable": "128Gi"},
+        }
+        result = runner.invoke(cli, ["stats"])
+
+    assert result.exit_code == 0
+    assert "CANFAR Platform Load" in result.stdout
+    assert "Maximum Resource Requests" in result.stdout
+    session_cls.assert_called_once_with()
+
+
+def test_stats_renders_only_cpu_and_ram_columns() -> None:
+    """Pin that ``canfar stats`` shows CPU/RAM but never the Instances column.
+
+    The Instances column is intentionally not rendered; this characterization
+    test guards that removing the disabled inline code leaves the human output
+    unchanged, i.e. no per-instance labels or counts leak into stdout.
+    """
+    with patch("canfar.cli.stats.AsyncSession") as session_cls:
+        session = _mock_async_session(session_cls)
+        session.stats.return_value = {
+            "instances": {"desktopApp": 2, "notebook": 3, "total": 5},
+            "cores": {"requestedCPUCores": 4, "cpuCoresAvailable": 64},
+            "ram": {"requestedRAM": "8Gi", "ramAvailable": "128Gi"},
+        }
+        result = runner.invoke(cli, ["stats"])
+
+    assert result.exit_code == 0
+    # The CPU/RAM table and its values are rendered.
+    assert "CPU" in result.stdout
+    assert "RAM" in result.stdout
+    assert "64" in result.stdout
+    assert "128Gi" in result.stdout
+    # The Instances column/data is not rendered (dead UI code).
+    assert "Instances" not in result.stdout
+    assert "Notebook" not in result.stdout
+    assert "Desktop" not in result.stdout
+    assert "desktopApp" not in result.stdout
 
 
 @pytest.mark.slow
@@ -38,3 +343,114 @@ def test_ps_command_integration() -> None:
     # Command should exit cleanly even if it fails due to auth/config issues
     # We're just testing that it doesn't crash with exit code 2 (syntax error)
     assert result.exit_code in [0, 1]  # 0 = success, 1 = expected failure
+
+
+@pytest.mark.parametrize("requested", [15, 0])
+def test_stats_displays_optional_gpu_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, requested: int
+) -> None:
+    """GPU-capable servers show usage, including an idle GPU pool."""
+    monkeypatch.setenv("CANFAR_TOKEN", "test-token")
+    monkeypatch.setenv("CANFAR_URL", "https://example.test/skaha/v1/")
+    real_client = httpx2.AsyncClient
+    transport = httpx2.MockTransport(
+        lambda _request: httpx2.Response(
+            200,
+            json={
+                "cores": {"requestedCPUCores": 873.25, "cpuCoresAvailable": 3000},
+                "ram": {"requestedRAM": "9432.822G", "ramAvailable": "15032.386G"},
+                "gpu": {"requestedGPU": requested, "gpuAvailable": 112, "maxGPU": 7},
+            },
+        )
+    )
+    with (
+        _patch_config(tmp_path / "config.yaml"),
+        patch(
+            "canfar.client.AsyncClient",
+            side_effect=lambda **kw: real_client(transport=transport, **kw),
+        ),
+    ):
+        result = runner.invoke(cli, ["stats"])
+    assert result.exit_code == 0, result.output
+    assert "GPU" in result.stdout
+    assert f"Usage │ {requested}" in result.stdout
+    assert "Total │ 112" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("resources", "expected"),
+    [
+        (
+            {
+                "fixed": {
+                    "cores": {"min": 1, "max": 16},
+                    "ram": {"min": 1, "max": 192},
+                },
+                "flexible": {
+                    "cores": {"min": 1, "max": 16},
+                    "ram": {"min": 4, "max": 32},
+                },
+            },
+            ["Fixed: 16 Cores & 192 GB", "Flexible: 16 Cores & 32 GB"],
+        ),
+        (
+            {
+                "fixed": {"cores": {"min": 1, "max": 48}},
+                "flexible": {"ram": {"min": 2, "max": 64}},
+            },
+            ["Fixed: 48 Cores & unknown GB", "Flexible: unknown Cores & 64 GB"],
+        ),
+        (None, ["Fixed: unknown", "Flexible: unknown"]),
+    ],
+)
+def test_stats_uses_selected_server_resource_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resources: dict | None,
+    expected: list[str],
+) -> None:
+    """Saved limits override stats maxima, and missing limits stay unknown."""
+    monkeypatch.setenv("CANFAR_TOKEN", "test-token")
+    monkeypatch.setenv("CANFAR_URL", "https://example.test/skaha/v1/")
+    real_client = httpx2.AsyncClient
+    transport = httpx2.MockTransport(
+        lambda _request: httpx2.Response(
+            200,
+            json={
+                "cores": {
+                    "requestedCPUCores": 4,
+                    "cpuCoresAvailable": 64,
+                    "maxCPUCores": {"cpuCores": 99, "withRam": "999G"},
+                },
+                "ram": {"requestedRAM": "8G", "ramAvailable": "128G"},
+            },
+        )
+    )
+    with (
+        _patch_config(tmp_path / "config.yaml"),
+        patch(
+            "canfar.client.AsyncClient",
+            side_effect=lambda **kw: real_client(transport=transport, **kw),
+        ),
+    ):
+        config = Configuration()
+        config.editor.set(
+            "servers.other",
+            {
+                "url": "https://example.test/skaha",
+                "version": "v1",
+                "idp": "cadc",
+                "resources": resources,
+            },
+        )
+        config.editor.set("active.server", "other")
+        config.editor.save()
+        result = runner.invoke(cli, ["stats"])
+    assert result.exit_code == 0, result.output
+    assert "@other" in result.stdout
+    assert "Maximum Resource Requests" in result.stdout
+    for line in expected:
+        assert line in result.stdout
+    assert "GPU" not in result.stdout
+    assert "999" not in result.stdout
+    assert "Maximum Requests Size" not in result.stdout

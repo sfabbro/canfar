@@ -1,81 +1,74 @@
-"""HTTPx hook to check for authentication expiry."""
+"""HTTPX2 hook to check for authentication expiry."""
 
 from __future__ import annotations
 
+import logging
+from functools import partial
 from typing import TYPE_CHECKING, Callable
 
 from canfar.auth import x509
 from canfar.exceptions.context import AuthExpiredError
 
+log = logging.getLogger(__name__)
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable
 
-    import httpx
+    from httpx2 import Request
 
     from canfar.client import HTTPClient
 
 
-def check(client: HTTPClient) -> Callable[[httpx.Request], None]:
-    """Create a hook to check for authentication expiry.
+def _check_expiry(client: HTTPClient, _request: Request) -> None:
+    """Reject a request whose saved Authentication Record is expired.
+
+    Raises:
+        AuthExpiredError: if the saved Authentication Record is expired or its
+            X.509 certificate cannot be loaded.
+    """
+    if client.uses_runtime_credentials:
+        log.debug(
+            "Skipping saved Authentication Record expiry check; "
+            "runtime credentials are active."
+        )
+        return
+
+    credential = client.authentication_record
+    if credential is None:
+        return
+
+    try:
+        expired = credential.expired
+    except x509.CertificateError as err:
+        raise AuthExpiredError(context=credential.idp, reason=str(err)) from err
+
+    if expired:
+        reason = (
+            "X.509 certificate expired."
+            if credential.mode == "x509"
+            else "OIDC access token expired."
+        )
+        raise AuthExpiredError(context=credential.idp, reason=reason)
+
+
+async def _acheck_expiry(client: HTTPClient, request: Request) -> None:
+    """Run the expiry check as an httpx2 async event hook."""
+    _check_expiry(client, request)
+
+
+def check(client: HTTPClient) -> Callable[[Request], None]:
+    """Create a request hook that rejects expired saved credentials.
 
     Args:
         client (HTTPClient): The CANFAR client.
-
     """
-
-    def hook(request: httpx.Request) -> None:  # noqa: ARG001
-        """Check if the authentication context is expired.
-
-        Args:
-            request (httpx.Request): The request.
-
-        Raises:
-            AuthExpiredError: If the authentication context is expired.
-
-        """
-        try:
-            expired = client.config.context.expired
-        except x509.CertificateError as err:
-            raise AuthExpiredError(
-                context=client.config.context.mode, reason=str(err)
-            ) from err
-
-        if expired:
-            raise AuthExpiredError(
-                context=client.config.context.mode, reason="auth expired"
-            )
-
-    return hook
+    return partial(_check_expiry, client)
 
 
-def acheck(client: HTTPClient) -> Callable[[httpx.Request], Awaitable[None]]:
-    """Create an async hook to check for authentication expiry.
-
-    This returns an async callable suitable for httpx's async event hooks.
+def acheck(client: HTTPClient) -> Callable[[Request], Awaitable[None]]:
+    """Create an async request hook that rejects expired saved credentials.
 
     Args:
         client (HTTPClient): The CANFAR client.
     """
-
-    async def hook(request: httpx.Request) -> None:  # noqa: ARG001
-        """Check if the authentication context is expired.
-
-        Args:
-            request (httpx.Request): The request.
-
-        Raises:
-            AuthExpiredError: If the authentication context is expired.
-        """
-        try:
-            expired = client.config.context.expired
-        except x509.CertificateError as err:
-            raise AuthExpiredError(
-                context=client.config.context.mode, reason=str(err)
-            ) from err
-
-        if expired:
-            raise AuthExpiredError(
-                context=client.config.context.mode, reason="auth expired"
-            )
-
-    return hook
+    return partial(_acheck_expiry, client)

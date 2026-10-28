@@ -11,38 +11,25 @@ from rich import box
 from rich.table import Table
 
 from canfar.sessions import AsyncSession
-from canfar.utils.console import console
-
-events = typer.Typer(
-    name="events",
-    help="List events for sessions.",
-    no_args_is_help=False,
-)
+from canfar.utils.console import emit_cli_active_server_banner, get_console
 
 
-@events.callback(invoke_without_command=True)
 def get_events(
     session_ids: Annotated[
         list[str],
         typer.Argument(help="One or more session IDs."),
     ],
-    debug: Annotated[
-        bool,
-        typer.Option(
-            "--debug",
-            help="Enable debug logging.",
-        ),
-    ] = False,
 ) -> None:
     """Get events from the science platform server."""
+    emit_cli_active_server_banner()
 
     async def _get_events() -> None:
-        log_level = "DEBUG" if debug else "INFO"
-        async with AsyncSession(loglevel=log_level) as session:
+        """Fetch events for the requested sessions and render them."""
+        async with AsyncSession(errors="ignore") as session:
             all_events = await session.events(ids=session_ids)
 
         if not all_events:
-            console.print(
+            get_console(stderr=True).print(
                 "[yellow]No events found for the specified session(s).[/yellow]"
             )
             return
@@ -69,6 +56,6 @@ def get_events(
                     if len(parts) == 5:
                         table.add_row(*parts)
 
-                console.print(table)
+                get_console().print(table)
 
     asyncio.run(_get_events())

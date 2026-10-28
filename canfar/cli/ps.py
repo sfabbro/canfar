@@ -6,32 +6,136 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Annotated, get_args
 
-import click
 import humanize
 import typer
+from httpx2 import HTTPError
 from pydantic import ValidationError
 from rich import box
 from rich.table import Table
 
-from canfar.hooks.typer.aliases import AliasGroup
+from canfar.cli import output
+from canfar.cli.machine import OutputOption, resolve_mode
+from canfar.config.migration import ConfigResetRequiredError
+from canfar.exceptions.context import AuthContextError, AuthExpiredError
+from canfar.hooks.httpx.auth import AuthenticationError
 from canfar.models.session import FetchResponse
 from canfar.models.types import Kind, Status
 from canfar.sessions import AsyncSession
-from canfar.utils.console import console
-
-ps = typer.Typer(
-    name="ps",
-    no_args_is_help=False,
-    cls=AliasGroup,
-)
+from canfar.utils.console import emit_cli_active_server_banner, get_console
 
 
-@ps.callback(invoke_without_command=True)
+async def _fetch_sessions(
+    kind: Kind | None,
+    status: Status | None,
+) -> list[dict[str, str]]:
+    """Fetch sessions at the external Science Platform boundary."""
+    async with AsyncSession() as session:
+        return await session.fetch(kind=kind, status=status)
+
+
+def _fetch_session_payloads(
+    kind: Kind | None,
+    status: Status | None,
+    mode: output.OutputMode,
+) -> list[dict[str, str]]:
+    """Fetch session payloads and map expected boundary failures."""
+    try:
+        return asyncio.run(_fetch_sessions(kind, status))
+    except (
+        ConfigResetRequiredError,
+        AuthExpiredError,
+        AuthContextError,
+        AuthenticationError,
+        HTTPError,
+    ) as err:
+        output.fail(
+            output.boundary_failure(err, transport_message="Unable to list sessions."),
+            mode,
+        )
+
+
+def _sanitize_sessions(
+    payloads: list[dict[str, str]],
+) -> tuple[list[FetchResponse], list[str]]:
+    """Validate and sort session payloads while collecting anomalies."""
+    sessions: list[FetchResponse] = []
+    anomalies: list[str] = []
+    for payload in payloads:
+        try:
+            session = FetchResponse.model_validate(payload)
+        except ValidationError as err:
+            typer.echo(f"Error: {err}", err=True)
+            continue
+        sessions.append(session)
+        anomalies.extend(session.anomalies)
+
+    sessions.sort(
+        key=lambda item: item.startTime or datetime.max.replace(tzinfo=timezone.utc)
+    )
+    return sessions, anomalies
+
+
+def _session_table(sessions: list[FetchResponse]) -> Table:
+    """Build the human-readable session table."""
+    table = Table(title="CANFAR Sessions", box=box.SIMPLE)
+    table.add_column("SESSION ID", style="cyan")
+    table.add_column("NAME", style="magenta")
+    table.add_column("KIND", style="green")
+    table.add_column("STATUS", style="green")
+    table.add_column("IMAGE", style="blue")
+    table.add_column("CREATED", style="yellow")
+
+    for session in sessions:
+        created = "unknown"
+        if session.startTime:
+            uptime = datetime.now(timezone.utc) - session.startTime
+            created = humanize.naturaldelta(uptime)
+        table.add_row(
+            session.id,
+            session.name or session.id,
+            session.type,
+            session.status,
+            session.image,
+            created,
+        )
+    return table
+
+
+def _render_human_sessions(
+    sessions: list[FetchResponse],
+    anomalies: list[str],
+    *,
+    quiet: bool,
+    everything: bool,
+    debug: bool,
+) -> None:
+    """Render one human-mode view of the visible session sequence."""
+    if quiet:
+        for session in sessions:
+            get_console().print(session.id)
+        return
+
+    if not sessions and not everything:
+        get_console(stderr=True).print(
+            "[yellow]No pending or running sessions found.[/yellow]"
+        )
+        get_console(stderr=True).print(
+            "[dim]Use [italic]--all[/italic] to show all sessions.[/dim]"
+        )
+    else:
+        get_console().print(_session_table(sessions))
+
+    if anomalies and debug:
+        get_console(stderr=True).print("[yellow]Session Response Warnings:[/yellow]")
+        for message in dict.fromkeys(anomalies):
+            get_console(stderr=True).print(f"[dim]- {message}[/dim]")
+
+
 def show(
     everything: Annotated[
         bool,
         typer.Option(
-            "--all", "-a", help="Show all sessions (default shows just running)."
+            "--all", "-a", help="Show all sessions (default shows Pending and Running)."
         ),
     ] = False,
     quiet: Annotated[
@@ -43,7 +147,6 @@ def show(
         typer.Option(
             "--kind",
             "-k",
-            click_type=click.Choice(list(get_args(Kind)), case_sensitive=True),
             metavar="|".join(get_args(Kind)),
             help="Filter by session kind.",
         ),
@@ -53,7 +156,6 @@ def show(
         typer.Option(
             "--status",
             "-s",
-            click_type=click.Choice(list(get_args(Status)), case_sensitive=True),
             metavar="|".join(get_args(Status)),
             help="Filter by session status.",
         ),
@@ -62,76 +164,42 @@ def show(
         bool,
         typer.Option(
             "--debug",
-            help="Enable debug logging.",
+            help="Show Session response warnings.",
         ),
     ] = False,
+    output_format: OutputOption = None,
 ) -> None:
     """Show sessions."""
+    mode = resolve_mode(output_format)
+    if mode is output.OutputMode.HUMAN:
+        emit_cli_active_server_banner()
 
-    async def _list_sessions() -> None:
-        """Asynchronous function to list sessions."""
-        log_level = "DEBUG" if debug else "INFO"
-        async with AsyncSession(loglevel=log_level) as session:
-            raw = await session.fetch(kind=kind, status=status)
-
-        sanitized: list[FetchResponse] = []
-        anomalies: list[str] = []
-
-        for payload in raw:
-            try:
-                _info = FetchResponse.model_validate(payload)
-                sanitized.append(_info)
-                anomalies.extend(_info.anomalies)
-            except ValidationError as err:
-                console.print(f"[bold red]Error:[/bold red] {err}")
-                continue
-
-        sessions = sorted(
-            sanitized,
-            key=lambda x: x.startTime or datetime.max.replace(tzinfo=timezone.utc),
-            reverse=False,
+    if quiet and mode is not output.OutputMode.HUMAN:
+        typer.echo(
+            "Incompatible flags: --quiet is human-only and cannot be used with "
+            "--output json or --output yaml.",
+            err=True,
         )
+        raise typer.Exit(output.OUTPUT_CONFLICT_EXIT_CODE)
 
-        if quiet:
-            for instance in sessions:
-                console.print(instance.id)
-                return
+    sessions, anomalies = _sanitize_sessions(
+        _fetch_session_payloads(kind, status, mode)
+    )
 
-        table = Table(title="CANFAR Sessions", box=box.SIMPLE)
-        table.add_column("SESSION ID", style="cyan")
-        table.add_column("NAME", style="magenta")
-        table.add_column("KIND", style="green")
-        table.add_column("STATUS", style="green")
-        table.add_column("IMAGE", style="blue")
-        table.add_column("CREATED", style="yellow")
+    visible = [
+        instance
+        for instance in sessions
+        if everything or instance.status in ["Pending", "Running"]
+    ]
 
-        running = 0
-        for instance in sessions:
-            if not everything and instance.status not in ["Pending", "Running"]:
-                continue
-            created = "unknown"
-            if instance.startTime:
-                uptime = datetime.now(timezone.utc) - instance.startTime
-                created = humanize.naturaldelta(uptime)
-            running += 1
-            table.add_row(
-                instance.id,
-                instance.name or instance.id,
-                instance.type,
-                instance.status,
-                instance.image,
-                created,
-            )
+    if mode is not output.OutputMode.HUMAN:
+        output.to_stdout(visible, mode)
+        return
 
-        if running == 0 and not everything:
-            console.print("[yellow]No pending or running sessions found.[/yellow]")
-            console.print("[dim]Use [italic]--all[/italic] to show all sessions.[/dim]")
-        else:
-            console.print(table)
-
-        if anomalies and debug:
-            console.print("[yellow]Session Response Warnings:[/yellow]")
-            for message in dict.fromkeys(anomalies):
-                console.print(f"[dim]- {message}[/dim]")
-
-    asyncio.run(_list_sessions())
+    _render_human_sessions(
+        visible,
+        anomalies,
+        quiet=quiet,
+        everything=everything,
+        debug=debug,
+    )

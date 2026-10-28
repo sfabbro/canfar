@@ -1,26 +1,27 @@
 """Test CANFAR Python Client API."""
-# ruff: noqa: SLF001
 
-import ssl
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-import httpx
+import httpx2
 import pytest
 from cryptography import x509
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
-from pydantic import AnyHttpUrl, AnyUrl, SecretStr, ValidationError
+from pydantic import AnyUrl, SecretStr, ValidationError
 
 from canfar.client import HTTPClient
-from canfar.models.auth import OIDC, X509, Client, Endpoint, Expiry, Token
+from canfar.exceptions.context import AuthExpiredError
+from canfar.models.auth import X509Credential
 from canfar.models.config import Configuration
 from canfar.models.http import Server
 from canfar.models.registry import ContainerRegistry
+from tests.helpers.config import configuration_with_credential, oidc_config, x509_config
+from tests.test_auth_x509 import generate_cert
 
 
 # Test Fixtures
@@ -34,26 +35,24 @@ def canfar_client_fixture():
     return _create_client
 
 
-@pytest.fixture
-def mock_httpx_client():
-    """Mock httpx.Client to prevent actual network calls."""
-    with patch("httpx.Client") as mock_client:
-        yield mock_client
+def _sync_client_factory(transport: httpx2.BaseTransport):
+    """Build native sync HTTPX2 clients over a supplied transport."""
+    return lambda **kwargs: httpx2.Client(transport=transport, **kwargs)
 
 
-@pytest.fixture
-def mock_httpx_async_client():
-    """Mock httpx.AsyncClient to prevent actual network calls."""
-    with patch("httpx.AsyncClient") as mock_async_client:
-        yield mock_async_client
+def _async_client_factory(transport: httpx2.BaseTransport):
+    """Build native async HTTPX2 clients over a supplied transport."""
+    return lambda **kwargs: httpx2.AsyncClient(transport=transport, **kwargs)
 
 
-@pytest.fixture
-def mock_cryptography():
-    """Mock cryptography functions for certificate validation."""
-    with patch("canfar.auth.x509.inspect") as mock_inspect:
-        mock_inspect.return_value = {"expiry": 9999999999}  # Far future
-        yield mock_inspect
+def _response_transport(requests: list[httpx2.Request]) -> httpx2.MockTransport:
+    """Record requests and return one successful native HTTPX2 response."""
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(200, json={"ok": True}, request=request)
+
+    return httpx2.MockTransport(respond)
 
 
 class TestInitializationAndConfiguration:
@@ -64,11 +63,27 @@ class TestInitializationAndConfiguration:
         client = canfar_client_fixture()
         assert client.timeout == 30
         assert client.concurrency == 32
-        assert client.loglevel == "INFO"
         assert client.token is None
         assert client.certificate is None
         assert client.url is None
         assert isinstance(client.config, Configuration)
+
+    @pytest.mark.parametrize("timeout", [30, 7])
+    async def test_native_client_timeouts(self, timeout, monkeypatch, tmp_path) -> None:
+        """Only async pool waiting is exempt from the configured HTTP timeout."""
+        monkeypatch.setattr(
+            "canfar.models.config.CONFIG_PATH", tmp_path / "config.yaml"
+        )
+        with HTTPClient(
+            token=SecretStr("test-token"), url="https://example.test", timeout=timeout
+        ) as client:
+            assert client.client.timeout == httpx2.Timeout(timeout)
+            async with client:
+                native_timeout = client.asynclient.timeout
+                assert native_timeout.pool is None
+                assert native_timeout.connect == timeout
+                assert native_timeout.read == timeout
+                assert native_timeout.write == timeout
 
     def test_constructor_arguments(self, canfar_client_fixture) -> None:
         """Test initialization with explicit constructor arguments."""
@@ -80,7 +95,6 @@ class TestInitializationAndConfiguration:
             certificate=Path("/test/cert.pem"),
             url="https://example.com/api",
             config=config,
-            loglevel="DEBUG",
         )
         assert client.timeout == 60
         assert client.concurrency == 64
@@ -89,7 +103,6 @@ class TestInitializationAndConfiguration:
         assert client.certificate is None
         assert str(client.url) == "https://example.com/api"
         assert client.config is config
-        assert client.loglevel == "DEBUG"
 
     def test_environment_variables(self, canfar_client_fixture, monkeypatch) -> None:
         """Test that environment variables are picked up correctly."""
@@ -97,7 +110,6 @@ class TestInitializationAndConfiguration:
         monkeypatch.setenv("CANFAR_CONCURRENCY", "16")
         monkeypatch.setenv("CANFAR_TOKEN", "env-token")
         monkeypatch.setenv("CANFAR_URL", "https://env.example.com")
-        monkeypatch.setenv("CANFAR_LOGLEVEL", "WARNING")
 
         client = canfar_client_fixture()
         assert client.timeout == 45
@@ -105,7 +117,6 @@ class TestInitializationAndConfiguration:
         assert client.token.get_secret_value() == "env-token"
         # URL gets normalized with trailing slash
         assert str(client.url) == "https://env.example.com/"
-        assert client.loglevel == "WARNING"
 
     def test_precedence_constructor_over_env(
         self, canfar_client_fixture, monkeypatch
@@ -123,12 +134,12 @@ class TestInitializationAndConfiguration:
         assert client.token.get_secret_value() == "constructor-token"
 
     def test_client_has_session_attribute(self, canfar_client_fixture) -> None:
-        """Test if HTTPClient object contains httpx.Client attribute."""
+        """Test if HTTPClient object contains httpx2.Client attribute."""
         client = canfar_client_fixture(
             token=SecretStr("test_token"), url="https://example.com"
         )
         assert hasattr(client, "client")
-        assert isinstance(client.client, httpx.Client)
+        assert isinstance(client.client, httpx2.Client)
 
     def test_bad_server_no_schema(self, canfar_client_fixture) -> None:
         """Test server URL without schema."""
@@ -146,6 +157,55 @@ class TestInitializationAndConfiguration:
 
 class TestRuntimeCredentialHandling:
     """Test runtime credential handling including mutual exclusivity and validation."""
+
+    def test_empty_token_uses_saved_oidc_authentication(
+        self,
+        canfar_client_fixture,
+    ) -> None:
+        """A sync request uses saved OIDC state when the runtime token is empty."""
+        config = oidc_config(idp="oidc")
+        requests: list[httpx2.Request] = []
+
+        with (
+            patch(
+                "canfar.client.Client",
+                side_effect=_sync_client_factory(_response_transport(requests)),
+            ),
+            canfar_client_fixture(config=config, token=SecretStr("")) as client,
+        ):
+            assert not client.uses_runtime_credentials
+            response = client.client.get("probe")
+
+        assert response.json() == {"ok": True}
+        assert len(requests) == 1
+        request = requests[0]
+        assert str(request.url) == "https://oidc.example.com//v1/probe"
+        assert request.headers["Authorization"] == "Bearer access-token"
+        assert request.headers["X-Skaha-Authentication-Type"] == "OIDC"
+
+    async def test_empty_token_uses_saved_oidc_authentication_async(
+        self,
+        canfar_client_fixture,
+    ) -> None:
+        """An async request uses saved OIDC state when the runtime token is empty."""
+        requests: list[httpx2.Request] = []
+
+        with patch(
+            "canfar.client.AsyncClient",
+            side_effect=_async_client_factory(_response_transport(requests)),
+        ):
+            async with canfar_client_fixture(
+                config=oidc_config(idp="oidc"),
+                token=SecretStr(""),
+            ) as client:
+                response = await client.asynclient.get("probe")
+
+        assert response.json() == {"ok": True}
+        assert len(requests) == 1
+        request = requests[0]
+        assert str(request.url) == "https://oidc.example.com//v1/probe"
+        assert request.headers["Authorization"] == "Bearer access-token"
+        assert request.headers["X-Skaha-Authentication-Type"] == "OIDC"
 
     def test_token_only(self, canfar_client_fixture) -> None:
         """Test instantiation with token only."""
@@ -212,15 +272,6 @@ class TestRuntimeCredentialHandling:
             canfar_client_fixture(
                 certificate=Path("/nonexistent/path.pem"), url="https://example.com"
             )
-
-    def test_token_setup_headers(self, canfar_client_fixture) -> None:
-        """Test token setup creates correct headers."""
-        token = "abcdef"
-        client = canfar_client_fixture(
-            token=SecretStr(token), url="https://example.com"
-        )
-        assert client.token.get_secret_value() == token
-        assert client.client.headers["Authorization"] == f"Bearer {token}"
 
 
 def _create_test_certificate(
@@ -295,70 +346,127 @@ class TestBaseURLConstruction:
     """Test base URL construction based on precedence."""
 
     def test_runtime_url_precedence(self, canfar_client_fixture) -> None:
-        """Test that runtime URL takes precedence."""
-        client = canfar_client_fixture(
-            token=SecretStr("test-token"), url="https://runtime.com/api"
-        )
-        base_url = client._get_base_url()
-        assert str(base_url) == "https://runtime.com/api"
+        """A request uses the runtime URL when runtime credentials are supplied."""
+        requests: list[httpx2.Request] = []
+
+        with (
+            patch(
+                "canfar.client.Client",
+                side_effect=_sync_client_factory(_response_transport(requests)),
+            ),
+            canfar_client_fixture(
+                token=SecretStr("test-token"), url="https://runtime.com/api"
+            ) as client,
+        ):
+            response = client.client.get("probe")
+
+        assert response.status_code == 200
+        assert str(requests[0].url) == "https://runtime.com/api/probe"
+        assert requests[0].headers["Authorization"] == "Bearer test-token"
 
     def test_configured_url_from_context(self, canfar_client_fixture) -> None:
-        """Test base URL construction from configuration context."""
-        # Create a custom context with specific server settings
-        custom_context = X509(
-            path=Path("/test/cert.pem"),
-            expiry=9999999999.0,
+        """A request uses the configured Science Platform Server URL."""
+        requests: list[httpx2.Request] = []
+
+        with (
+            patch(
+                "canfar.client.Client",
+                side_effect=_sync_client_factory(_response_transport(requests)),
+            ),
+            canfar_client_fixture(
+                config=oidc_config(server_url="https://config.example.com")
+            ) as client,
+        ):
+            response = client.client.get("probe")
+
+        assert response.status_code == 200
+        assert str(requests[0].url) == "https://config.example.com//v1/probe"
+
+    def test_no_server_in_context_raises_error(self, canfar_client_fixture) -> None:
+        """Test that missing server in context raises ValueError."""
+        config = configuration_with_credential(
+            X509Credential(
+                idp="test", path=Path("/test/cert.pem"), expiry=9999999999.0
+            ),
+        )
+
+        with (
+            canfar_client_fixture(config=config) as client,
+            pytest.raises(
+                ValueError, match="Server not found for Authentication Record"
+            ),
+        ):
+            client.client.get("probe")
+
+    def test_active_server_without_url_raises_error(
+        self, canfar_client_fixture
+    ) -> None:
+        """Test that active server with no URL raises ValueError."""
+        config = configuration_with_credential(
+            X509Credential(
+                idp="test", path=Path("/test/cert.pem"), expiry=9999999999.0
+            ),
             server=Server(
-                name="Test Server",
+                name="TestServer",
                 uri=AnyUrl("ivo://test.org/canfar"),
-                url=AnyHttpUrl("https://config.example.com"),
                 version="v1",
             ),
         )
 
-        config = Configuration(active="test", contexts={"test": custom_context})
-
-        client = canfar_client_fixture(config=config)
-        base_url = client._get_base_url()
-        assert str(base_url) == "https://config.example.com//v1"
-
-    def test_no_server_in_context_raises_error(self, canfar_client_fixture) -> None:
-        """Test that missing server in context raises ValueError."""
-        # Create a context without server
-        custom_context = X509(
-            path=Path("/test/cert.pem"), expiry=9999999999.0, server=None
-        )
-
-        config = Configuration(active="test", contexts={"test": custom_context})
-
-        client = canfar_client_fixture(config=config)
-        with pytest.raises(ValueError, match="Server not found in auth context"):
-            client._get_base_url()
+        with (
+            canfar_client_fixture(config=config) as client,
+            pytest.raises(ValueError, match="Active server has no URL configured"),
+        ):
+            client.client.get("probe")
 
 
 class TestCertificateValidation:
     """Test certificate validation functionality."""
 
     def test_certificate_validation_with_token_skips_validation(self, tmp_path) -> None:
-        """Test certificate validation when token provided takes precedence."""
+        """A runtime-token request ignores a supplied certificate."""
         # Create a valid certificate file for this test
         cert_path = tmp_path / "valid.pem"
         _create_test_certificate(cert_path)
 
-        # Even with a valid certificate, when token is provided, it should use the token
-        client = HTTPClient(
-            token=SecretStr("test-token"),
-            certificate=cert_path,
-            url="https://example.com",
-        )
-        assert client.token is not None
-        assert client.certificate is None  # Certificate should be nullified
+        requests: list[httpx2.Request] = []
+        with (
+            patch(
+                "canfar.client.Client",
+                side_effect=_sync_client_factory(_response_transport(requests)),
+            ),
+            HTTPClient(
+                token=SecretStr("test-token"),
+                certificate=cert_path,
+                url="https://example.com",
+            ) as client,
+        ):
+            response = client.client.get("probe")
 
-        # Verify that the client uses token authentication
-        headers = client._get_http_headers()
-        assert "Authorization" in headers
-        assert headers["Authorization"] == "Bearer test-token"
-        assert headers["X-Skaha-Authentication-Type"] == "RUNTIME-TOKEN"
+        assert response.status_code == 200
+        assert len(requests) == 1
+        assert str(requests[0].url) == "https://example.com/probe"
+        assert requests[0].headers["Authorization"] == "Bearer test-token"
+        assert requests[0].headers["X-Skaha-Authentication-Type"] == "RUNTIME-TOKEN"
+
+    def test_certificate_validates_for_native_request(self, tmp_path) -> None:
+        """A valid certificate can build a native client and complete a request."""
+        cert_path = tmp_path / "valid.pem"
+        _create_test_certificate(cert_path)
+        requests: list[httpx2.Request] = []
+
+        with (
+            patch(
+                "canfar.client.Client",
+                side_effect=_sync_client_factory(_response_transport(requests)),
+            ),
+            HTTPClient(certificate=cert_path, url="https://example.com") as client,
+        ):
+            response = client.client.get("probe")
+
+        assert response.status_code == 200
+        assert len(requests) == 1
+        assert requests[0].headers["X-Skaha-Authentication-Type"] == "RUNTIME-X509"
 
     def test_certificate_file_not_exists(self, tmp_path) -> None:
         """Test certificate validation when file doesn't exist."""
@@ -383,336 +491,219 @@ class TestCertificateValidation:
         ):
             HTTPClient(certificate=cert_path, url="https://example.com")
 
-    def test_certificate_valid(self, tmp_path) -> None:
-        """Test certificate validation with valid certificate."""
-        cert_path = tmp_path / "valid.pem"
-        _create_test_certificate(cert_path)
-
-        # Should not raise an error
-        client = HTTPClient(certificate=cert_path, url="https://example.com")
-        assert client.certificate == cert_path
-
 
 class TestHTTPClientCreationAndHeaders:
-    """Test HTTP client creation and header generation."""
+    """Test HTTP client requests and header generation."""
 
-    def test_lazy_client_initialization(self, canfar_client_fixture) -> None:
-        """Test that httpx clients are created only on first access."""
-        client = canfar_client_fixture(
-            token=SecretStr("test-token"), url="https://example.com"
-        )
-
-        # Initially, private attributes should be None
-        assert client._client is None
-        assert client._asynclient is None
-
-        # Access client property to trigger creation
-        sync_client = client.client
-        assert client._client is not None
-        assert isinstance(sync_client, httpx.Client)
-
-        # Access asynclient property to trigger creation
-        async_client = client.asynclient
-        assert client._asynclient is not None
-        assert isinstance(async_client, httpx.AsyncClient)
-
-    def test_default_headers_present(self, canfar_client_fixture) -> None:
-        """Test that common headers are present."""
-        client = canfar_client_fixture(
-            token=SecretStr("test-token"), url="https://example.com"
-        )
-        headers = client._get_http_headers()
-
-        assert "Content-Type" in headers
-        assert "Accept" in headers
-        assert "User-Agent" in headers
-        assert "Date" in headers
-        assert headers["Content-Type"] == "application/x-www-form-urlencoded"
-        assert headers["Accept"] == "application/json"
-        assert "python-canfar" in headers["User-Agent"]
-
-    def test_runtime_token_headers(self, canfar_client_fixture) -> None:
-        """Test headers for runtime token authentication."""
-        client = canfar_client_fixture(
-            token=SecretStr("test-token"), url="https://example.com"
-        )
-        headers = client._get_http_headers()
-
-        assert headers["Authorization"] == "Bearer test-token"
-        assert headers["X-Skaha-Authentication-Type"] == "RUNTIME-TOKEN"
-
-    def test_runtime_certificate_headers(self, canfar_client_fixture, tmp_path) -> None:
-        """Test headers for runtime certificate authentication."""
-        cert_path = tmp_path / "test.pem"
-        _create_test_certificate(cert_path)
-
-        client = canfar_client_fixture(certificate=cert_path, url="https://example.com")
-        headers = client._get_http_headers()
-
-        assert headers["X-Skaha-Authentication-Type"] == "RUNTIME-X509"
-        assert "Authorization" not in headers
-
-    def test_oidc_context_headers(self, canfar_client_fixture) -> None:
-        """Test headers for OIDC context authentication."""
-        # Create a real OIDC context
-        oidc_context = OIDC(
-            server=Server(
-                name="Test OIDC",
-                uri=AnyUrl("ivo://test.org/skaha"),
-                url=AnyHttpUrl("https://oidc.example.com"),
-                version="v1",
-            ),
-            endpoints=Endpoint(
-                discovery="https://oidc.example.com/.well-known/openid-configuration",
-                token="https://oidc.example.com/token",
-            ),
-            client=Client(identity="test-client", secret="test-secret"),
-            token=Token(access="oidc-access-token", refresh="refresh-token"),
-            expiry=Expiry(access=9999999999.0, refresh=9999999999.0),
-        )
-
-        config = Configuration(active="oidc", contexts={"oidc": oidc_context})
-
-        client = canfar_client_fixture(config=config)
-        headers = client._get_http_headers()
-
-        assert headers["Authorization"] == "Bearer oidc-access-token"
-        assert headers["X-Skaha-Authentication-Type"] == "OIDC"
-
-    def test_x509_context_headers(self, canfar_client_fixture) -> None:
-        """Test headers for X509 context authentication."""
-        # Create a real X509 context
-        x509_context = X509(
-            path=Path("/test/cert.pem"),
-            expiry=9999999999.0,
-            server=Server(
-                name="Test X509",
-                uri=AnyUrl("ivo://test.org/skaha"),
-                url=AnyHttpUrl("https://x509.example.com"),
-                version="v1",
-            ),
-        )
-
-        config = Configuration(active="x509", contexts={"x509": x509_context})
-
-        client = canfar_client_fixture(config=config)
-        headers = client._get_http_headers()
-
-        assert headers["X-Skaha-Authentication-Type"] == "X509"
-        assert "Authorization" not in headers
-
-    def test_registry_headers(self, canfar_client_fixture) -> None:
-        """Test headers with registry authentication."""
-        registry = ContainerRegistry(username="test", secret="test")
+    def test_sync_request_includes_common_and_registry_headers(
+        self,
+    ) -> None:
+        """A native sync request carries common and registry headers."""
         config = Configuration()
-        config.registry = registry
+        config.registry = ContainerRegistry(username="test", secret="test")
+        requests: list[httpx2.Request] = []
 
-        client = canfar_client_fixture(
-            token=SecretStr("test-token"), url="https://example.com", config=config
-        )
-        headers = client._get_http_headers()
-
-        assert "X-Skaha-Registry-Auth" in headers
-
-    def test_client_kwargs_timeout_and_concurrency(self, canfar_client_fixture) -> None:
-        """Test that httpx clients are initialized with correct timeout and limits."""
-        client = canfar_client_fixture(
-            token=SecretStr("test-token"),
-            url="https://example.com",
-            timeout=45,
-            concurrency=16,
-        )
-
-        # Test sync client kwargs
-        sync_kwargs = client._get_client_kwargs(asynchronous=False)
-        assert "timeout" in sync_kwargs
-        # httpx.Timeout doesn't have a .timeout attribute, it's the object itself
-        assert isinstance(sync_kwargs["timeout"], httpx.Timeout)
-        assert "limits" not in sync_kwargs  # Only for async
-
-        # Test async client kwargs
-        async_kwargs = client._get_client_kwargs(asynchronous=True)
-        assert "timeout" in async_kwargs
-        assert isinstance(async_kwargs["timeout"], httpx.Timeout)
-        assert "limits" in async_kwargs
-        assert async_kwargs["limits"].max_connections == 16
-
-    def test_oidc_refresh_hook_added(self, canfar_client_fixture) -> None:
-        """Test that OIDC refresh hook is added for OIDC contexts."""
-        # Create a real OIDC context
-        oidc_context = OIDC(
-            server=Server(
-                name="Test OIDC",
-                uri=AnyUrl("ivo://test.org/skaha"),
-                url=AnyHttpUrl("https://oidc.example.com"),
-                version="v1",
+        with (
+            patch(
+                "canfar.client.formatdate",
+                return_value="Wed, 09 Jun 2026 12:00:00 GMT",
+            ) as mock_formatdate,
+            patch(
+                "canfar.client.Client",
+                side_effect=_sync_client_factory(_response_transport(requests)),
             ),
-            endpoints=Endpoint(
-                discovery="https://oidc.example.com/.well-known/openid-configuration",
-                token="https://oidc.example.com/token",
+            HTTPClient(
+                token=SecretStr("test-token"),
+                url="https://example.com",
+                config=config,
+            ) as client,
+        ):
+            response = client.client.get("probe")
+
+        assert response.status_code == 200
+        mock_formatdate.assert_called_once_with(usegmt=True)
+        request = requests[0]
+        assert str(request.url) == "https://example.com/probe"
+        assert request.headers["Authorization"] == "Bearer test-token"
+        assert request.headers["X-Skaha-Authentication-Type"] == "RUNTIME-TOKEN"
+        assert request.headers["Content-Type"] == "application/x-www-form-urlencoded"
+        assert request.headers["Accept"] == "application/json"
+        assert request.headers["Date"] == "Wed, 09 Jun 2026 12:00:00 GMT"
+        assert "python-canfar" in request.headers["User-Agent"]
+        assert request.headers["X-Skaha-Registry-Auth"] == "dGVzdDp0ZXN0"
+
+    async def test_async_request_includes_common_headers(
+        self,
+        canfar_client_fixture,
+    ) -> None:
+        """A native async request carries common headers and returns its result."""
+        requests: list[httpx2.Request] = []
+
+        with (
+            patch(
+                "canfar.client.AsyncClient",
+                side_effect=_async_client_factory(_response_transport(requests)),
             ),
-            client=Client(identity="test-client", secret="test-secret"),
-            token=Token(access="oidc-access-token", refresh="refresh-token"),
-            expiry=Expiry(access=9999999999.0, refresh=9999999999.0),
-        )
+            canfar_client_fixture(
+                token=SecretStr("test-token"), url="https://example.com"
+            ) as client,
+        ):
+            response = await client.asynclient.get("probe")
 
-        config = Configuration(active="oidc", contexts={"oidc": oidc_context})
-
-        client = canfar_client_fixture(config=config)
-
-        # Test sync client kwargs
-        sync_kwargs = client._get_client_kwargs(asynchronous=False)
-        assert "event_hooks" in sync_kwargs
-        assert "request" in sync_kwargs["event_hooks"]
-
-        # Test async client kwargs
-        async_kwargs = client._get_client_kwargs(asynchronous=True)
-        assert "event_hooks" in async_kwargs
-        assert "request" in async_kwargs["event_hooks"]
+        assert response.status_code == 200
+        assert len(requests) == 1
+        request = requests[0]
+        assert str(request.url) == "https://example.com/probe"
+        assert request.headers["Authorization"] == "Bearer test-token"
+        assert request.headers["X-Skaha-Authentication-Type"] == "RUNTIME-TOKEN"
+        assert request.headers["Content-Type"] == "application/x-www-form-urlencoded"
+        assert request.headers["Accept"] == "application/json"
 
 
 class TestContextManagerBehavior:
     """Test context manager functionality."""
 
     def test_sync_context_manager_enter_exit(self, canfar_client_fixture) -> None:
-        """Test synchronous context manager entry and exit."""
-        client = canfar_client_fixture(
-            token=SecretStr("test-token"), url="https://example.com"
-        )
+        """The sync context manager returns the client and closes HTTPX2."""
+        requests: list[httpx2.Request] = []
+        created: list[httpx2.Client] = []
 
-        # Test __enter__
-        with client as ctx_client:
-            assert ctx_client is client
-            # Verify client is created
-            assert isinstance(ctx_client.client, httpx.Client)
+        def factory(**kwargs: object) -> httpx2.Client:
+            native = httpx2.Client(transport=_response_transport(requests), **kwargs)
+            created.append(native)
+            return native
 
-        # After exit, client should be closed
-        assert client._client is None
+        with (
+            patch("canfar.client.Client", side_effect=factory),
+            canfar_client_fixture(
+                token=SecretStr("test-token"), url="https://example.com"
+            ) as client,
+        ):
+            response = client.client.get("probe")
 
-    def test_sync_session_context(self, canfar_client_fixture) -> None:
-        """Test synchronous session context manager."""
-        client = canfar_client_fixture(
-            token=SecretStr("test-token"), url="https://example.com"
-        )
-
-        with client._session() as session:
-            assert isinstance(session, httpx.Client)
-
-        # After exit, client should be closed
-        assert client._client is None
-
-    def test_close_sync_client(self, canfar_client_fixture) -> None:
-        """Test closing synchronous client."""
-        client = canfar_client_fixture(
-            token=SecretStr("test-token"), url="https://example.com"
-        )
-
-        # Access client to create it
-        _ = client.client
-        assert client._client is not None
-
-        # Close it
-        client._close()
-        assert client._client is None
-
-    def test_close_sync_client_when_none(self, canfar_client_fixture) -> None:
-        """Test closing synchronous client when it's None."""
-        client = canfar_client_fixture(
-            token=SecretStr("test-token"), url="https://example.com"
-        )
-
-        # Don't access client, so it remains None
-        assert client._client is None
-
-        # Close should not raise an error
-        client._close()
-        assert client._client is None
+        assert response.status_code == 200
+        assert len(requests) == 1
+        assert created[0].is_closed
 
     async def test_async_context_manager_enter_exit(
         self, canfar_client_fixture
     ) -> None:
-        """Test asynchronous context manager entry and exit."""
-        client = canfar_client_fixture(
-            token=SecretStr("test-token"), url="https://example.com"
-        )
+        """The async context manager returns the client and closes HTTPX2."""
+        requests: list[httpx2.Request] = []
+        created: list[httpx2.AsyncClient] = []
 
-        # Test __aenter__
-        async with client as ctx_client:
-            assert ctx_client is client
-            # Verify asynclient is created
-            assert isinstance(ctx_client.asynclient, httpx.AsyncClient)
+        def factory(**kwargs: object) -> httpx2.AsyncClient:
+            native = httpx2.AsyncClient(
+                transport=_response_transport(requests), **kwargs
+            )
+            created.append(native)
+            return native
 
-        # After exit, asynclient should be closed
-        assert client._asynclient is None
+        with patch("canfar.client.AsyncClient", side_effect=factory):
+            async with canfar_client_fixture(
+                token=SecretStr("test-token"), url="https://example.com"
+            ) as client:
+                response = await client.asynclient.get("probe")
 
-    async def test_async_session_context(self, canfar_client_fixture) -> None:
-        """Test asynchronous session context manager."""
-        client = canfar_client_fixture(
-            token=SecretStr("test-token"), url="https://example.com"
-        )
-
-        async with client._asession() as session:
-            assert isinstance(session, httpx.AsyncClient)
-
-        # After exit, asynclient should be closed
-        assert client._asynclient is None
-
-    async def test_aclose_async_client(self, canfar_client_fixture) -> None:
-        """Test closing asynchronous client."""
-        client = canfar_client_fixture(
-            token=SecretStr("test-token"), url="https://example.com"
-        )
-
-        # Access asynclient to create it
-        _ = client.asynclient
-        assert client._asynclient is not None
-
-        # Close it
-        await client._aclose()
-        assert client._asynclient is None
-
-    async def test_aclose_async_client_when_none(self, canfar_client_fixture) -> None:
-        """Test closing asynchronous client when it's None."""
-        client = canfar_client_fixture(
-            token=SecretStr("test-token"), url="https://example.com"
-        )
-
-        # Don't access asynclient, so it remains None
-        assert client._asynclient is None
-
-        # Close should not raise an error
-        await client._aclose()
-        assert client._asynclient is None
+        assert response.status_code == 200
+        assert len(requests) == 1
+        assert created[0].is_closed
 
 
 class TestSSLContextAndClientKwargs:
-    """Test SSL context creation and client kwargs generation."""
+    """Test observable TLS validation and request-hook behavior."""
 
-    def test_get_client_kwargs_with_certificate(
+    def test_expiry_hook_omitted_for_runtime_token(
         self, canfar_client_fixture, tmp_path
     ) -> None:
-        """Test client kwargs with certificate authentication."""
-        cert_path = tmp_path / "test.pem"
-        _create_test_certificate(cert_path)
+        """Runtime credentials bypass expiry checks from saved X.509 state."""
+        cert_path = tmp_path / "expired.pem"
+        generate_cert(cert_path, expired=True)
+        requests: list[httpx2.Request] = []
+        config = x509_config(idp="x509", path=cert_path, expiry=0.0)
 
-        client = canfar_client_fixture(certificate=cert_path, url="https://example.com")
-        kwargs = client._get_client_kwargs(asynchronous=False)
+        with (
+            patch(
+                "canfar.client.Client",
+                side_effect=_sync_client_factory(_response_transport(requests)),
+            ),
+            canfar_client_fixture(
+                config=config,
+                token=SecretStr("runtime-token"),
+                url="https://runtime.com",
+            ) as client,
+        ):
+            response = client.client.get("probe")
 
-        assert "verify" in kwargs
-        assert isinstance(kwargs["verify"], ssl.SSLContext)
+        assert response.status_code == 200
+        assert len(requests) == 1
+        assert requests[0].headers["Authorization"] == "Bearer runtime-token"
 
-    def test_get_ssl_context_valid_certificate(
+    async def test_async_expiry_hook_omitted_for_runtime_token(
         self, canfar_client_fixture, tmp_path
     ) -> None:
-        """Test SSL context creation with valid certificate."""
-        cert_path = tmp_path / "test.pem"
-        _create_test_certificate(cert_path)
+        """Async runtime credentials bypass saved X.509 expiry checks."""
+        cert_path = tmp_path / "expired.pem"
+        generate_cert(cert_path, expired=True)
+        requests: list[httpx2.Request] = []
 
-        client = canfar_client_fixture(certificate=cert_path, url="https://example.com")
-        ssl_context = client._get_ssl_context(cert_path)
+        with patch(
+            "canfar.client.AsyncClient",
+            side_effect=_async_client_factory(_response_transport(requests)),
+        ):
+            async with canfar_client_fixture(
+                config=x509_config(idp="x509", path=cert_path, expiry=0.0),
+                token=SecretStr("runtime-token"),
+                url="https://runtime.com",
+            ) as client:
+                response = await client.asynclient.get("probe")
 
-        assert isinstance(ssl_context, ssl.SSLContext)
-        assert ssl_context.minimum_version == ssl.TLSVersion.TLSv1_2
+        assert response.status_code == 200
+        assert len(requests) == 1
+        assert requests[0].headers["Authorization"] == "Bearer runtime-token"
+
+    def test_expiry_hook_present_for_saved_expired_x509(
+        self, canfar_client_fixture, tmp_path
+    ) -> None:
+        """A sync request rejects an expired saved X.509 record."""
+        cert_path = tmp_path / "expired.pem"
+        generate_cert(cert_path, expired=True)
+        requests: list[httpx2.Request] = []
+        config = x509_config(idp="x509", path=cert_path, expiry=0.0)
+
+        with (
+            patch(
+                "canfar.client.Client",
+                side_effect=_sync_client_factory(_response_transport(requests)),
+            ),
+            canfar_client_fixture(config=config) as client,
+            pytest.raises(AuthExpiredError, match="expired"),
+        ):
+            client.client.get("probe")
+
+        assert requests == []
+
+    async def test_async_expiry_hook_present_for_saved_expired_x509(
+        self, canfar_client_fixture, tmp_path
+    ) -> None:
+        """An async request rejects an expired saved X.509 record."""
+        cert_path = tmp_path / "expired.pem"
+        generate_cert(cert_path, expired=True)
+        requests: list[httpx2.Request] = []
+
+        with (
+            patch(
+                "canfar.client.AsyncClient",
+                side_effect=_async_client_factory(_response_transport(requests)),
+            ),
+            pytest.raises(AuthExpiredError, match="expired"),
+        ):
+            async with canfar_client_fixture(
+                config=x509_config(idp="x509", path=cert_path, expiry=0.0)
+            ) as client:
+                await client.asynclient.get("probe")
+
+        assert requests == []
 
 
 def test_non_readable_certfile() -> None:
@@ -723,3 +714,148 @@ def test_non_readable_certfile() -> None:
     Path(temp_path).chmod(0o000)
     with pytest.raises(PermissionError):
         HTTPClient(certificate=temp_path, url="https://example.com")
+
+
+class TestCustomTransport:
+    """Test caller-injected transport handling on HTTPClient."""
+
+    def test_sync_client_uses_injected_transport_and_does_not_close_it(
+        self,
+    ) -> None:
+        """Sync client sends requests via transport and close leaves it open."""
+        closed = False
+
+        class SyncTransport(httpx2.BaseTransport):
+            def handle_request(self, request: httpx2.Request) -> httpx2.Response:
+                payload = {"source": "sync_pool"}
+                return httpx2.Response(200, json=payload, request=request)
+
+            def close(self) -> None:
+                nonlocal closed
+                closed = True
+
+        transport = SyncTransport()
+        with HTTPClient(
+            token=SecretStr("test-token"),
+            url="https://example.test",
+            transport=transport,
+        ) as client:
+            response = client.client.get("probe")
+            assert response.status_code == 200
+            assert response.json() == {"source": "sync_pool"}
+
+        assert closed is False
+        transport.close()
+        assert closed is True
+
+    async def test_async_client_uses_injected_transport_and_does_not_close_it(
+        self,
+    ) -> None:
+        """Async client sends requests via transport and aclose leaves it open."""
+        closed = False
+
+        class AsyncPoolTransport(httpx2.AsyncBaseTransport):
+            async def handle_async_request(
+                self, request: httpx2.Request
+            ) -> httpx2.Response:
+                payload = {"source": "async_pool"}
+                return httpx2.Response(200, json=payload, request=request)
+
+            async def aclose(self) -> None:
+                nonlocal closed
+                closed = True
+
+        transport = AsyncPoolTransport()
+        async with HTTPClient(
+            token=SecretStr("test-token"),
+            url="https://example.test",
+            transport=transport,
+        ) as client:
+            response = await client.asynclient.get("probe")
+            assert response.status_code == 200
+            assert response.json() == {"source": "async_pool"}
+
+        assert closed is False
+        await transport.aclose()
+        assert closed is True
+
+    def test_sync_client_rejects_pure_async_transport(self) -> None:
+        """Building a sync client with an AsyncBaseTransport raises TypeError."""
+
+        class PureAsyncTransport(httpx2.AsyncBaseTransport):
+            async def handle_async_request(
+                self, request: httpx2.Request
+            ) -> httpx2.Response:
+                return httpx2.Response(200, request=request)
+
+        client = HTTPClient(
+            token=SecretStr("test-token"),
+            url="https://example.test",
+            transport=PureAsyncTransport(),
+        )
+        with pytest.raises(TypeError, match="BaseTransport"):
+            _ = client.client
+
+    async def test_async_client_rejects_pure_sync_transport(self) -> None:
+        """Building an async client with a BaseTransport raises TypeError."""
+
+        class PureSyncTransport(httpx2.BaseTransport):
+            def handle_request(self, request: httpx2.Request) -> httpx2.Response:
+                return httpx2.Response(200, request=request)
+
+        client = HTTPClient(
+            token=SecretStr("test-token"),
+            url="https://example.test",
+            transport=PureSyncTransport(),
+        )
+        with pytest.raises(TypeError, match="AsyncBaseTransport"):
+            _ = client.asynclient
+
+    def test_mock_transport_serves_both_sync_and_async(self) -> None:
+        """MockTransport implements both protocols and serves both client modes."""
+        transport = httpx2.MockTransport(
+            lambda req: httpx2.Response(200, json={"ok": True}, request=req)
+        )
+        client = HTTPClient(
+            token=SecretStr("test-token"),
+            url="https://example.test",
+            transport=transport,
+        )
+        assert client.client.get("probe").json() == {"ok": True}
+
+    def test_transport_with_runtime_certificate_raises_value_error(
+        self, tmp_path
+    ) -> None:
+        """Combining transport with runtime cert raises ValueError."""
+        cert_path = tmp_path / "cert.pem"
+        generate_cert(cert_path)
+        transport = httpx2.HTTPTransport()
+
+        with pytest.raises(ValueError, match=r"X\.509 client certificate"):
+            HTTPClient(
+                certificate=cert_path,
+                url="https://example.test",
+                transport=transport,
+            )
+
+    def test_transport_with_saved_x509_credential_raises_value_error(
+        self, tmp_path
+    ) -> None:
+        """Combining transport with saved X.509 record raises ValueError."""
+        cert_path = tmp_path / "cert.pem"
+        generate_cert(cert_path)
+        transport = httpx2.HTTPTransport()
+
+        with pytest.raises(ValueError, match=r"X\.509 client certificate"):
+            HTTPClient(
+                config=x509_config(idp="cadc", path=cert_path, expiry=1000.0),
+                url="https://example.test",
+                transport=transport,
+            )
+
+    @pytest.mark.parametrize("name", ["CANFAR_TRANSPORT", "TRANSPORT"])
+    def test_transport_ignores_env_var(self, monkeypatch, name) -> None:
+        """No environment variable can supply the transport."""
+        monkeypatch.setenv(name, "invalid-transport-string")
+        client = HTTPClient(token=SecretStr("token"), url="https://example.test")
+        assert client.transport is None

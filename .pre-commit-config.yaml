@@ -1,23 +1,8 @@
 repos:
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.17.1
+  - repo: https://github.com/astral-sh/ty-pre-commit
+    rev: v0.0.51
     hooks:
-      - id: mypy
-        additional_dependencies:
-          - types-toml
-          - types-requests
-          - types-defusedxml
-          - types-PyYAML
-          - httpx
-          - pydantic
-          - pydantic_settings
-          - rich
-          - segno
-          - typer
-          - cadcutils
-          - questionary
-          - humanize
-        args: [--config-file=pyproject.toml]
+      - id: ty
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
@@ -48,7 +33,7 @@ repos:
       args: ["cc", "--min=C","--total-average","--exclude=tests/*.py"]
 
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.28.0
+    rev: v8.30.0
     hooks:
       - id: gitleaks
 
@@ -60,7 +45,7 @@ repos:
         exclude: (^|/)uv\.lock$|^tests/
   # Python code formatting and linting with Ruff
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.12.10
+    rev: v0.16.0
     hooks:
       # Linter
       - id: ruff
@@ -76,13 +61,6 @@ repos:
 
   # GitHub Actions workflow linting
   - repo: https://github.com/rhysd/actionlint
-    rev: v1.7.7
+    rev: v1.7.12
     hooks:
       - id: actionlint
-
-  # Check for Python version compatibility
-  - repo: https://github.com/asottile/pyupgrade
-    rev: v3.20.0
-    hooks:
-      - id: pyupgrade
-        args: [--py39-plus]

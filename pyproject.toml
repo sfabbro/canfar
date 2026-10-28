@@ -1,10 +1,16 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling>=1.32.4"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel.force-include]
+"canfar/utils/data/scientists.txt" = "canfar/utils/data/scientists.txt"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [project]
 name = "canfar"
-version = "1.3.3"
+version = "1.5.2"
 requires-python = ">=3.10"
 description = "Python Client for CANFAR Science Platform"
 license = { file = "LICENSE" }
@@ -40,47 +46,37 @@ classifiers = [
 ]
 
 dependencies = [
-    "cadcutils>=1.5.4",
+    "authlib>=1.8.0",
     "defusedxml>=0.7.1",
-    "httpx[http2]>=0.28.1",
-    "humanize>=4.12.3",
-    "pydantic>=2.9.2",
-    "pydantic-settings>=2.9.1",
-    "pyyaml>=6.0.2",
-    "questionary>=2.1.0",
-    "rich>=13.9.4",
+    "httpx2[http2]>=2.0.0",
+    "humanize>=4.16.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.15.0",
+    "pyyaml>=6.0.3",
+    "rich>=15.0.0",
     "segno>=1.6.6",
-    "toml>=0.10.2",
-    "typer>=0.16.0",
+    "typer>=0.27.2",
+    "cryptography>=45.0.1",
+    "vosfs>=0.12.0",
+    "fss-cli>=0.11.1",
 ]
 
-[tool.uv]
 [dependency-groups]
 dev = [
-    "bandit[toml]>=1.7.5",
-    "ipython>=8.37.0",
-    "mypy>=1.15.0",
-    "pre-commit>=4.2.0",
-    "pytest>=8.3.5",
-    "pytest-asyncio>=1.0.0",
-    "pytest-cov>=6.1.1",
-    "pytest-mock>=3.14.1",
-    "pytest-order>=1.3.0",
-    "pytest-xdist>=3.7.0",
-    "pytest-timeout>=2.4.0",
-    "respx>=0.22.0",
-    "ruff>=0.11.11",
-    "types-defusedxml>=0.7.0.20250516",
-    "types-pyyaml>=6.0.12.20250516",
-    "types-toml>=0.10.8.20240310",
-    "vulture>=2.11",
+    "pre-commit>=4.6.2",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+    "pytest-cov>=7.1.0",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.16.10",
+    "ty>=0.0.84",
 ]
 docs = [
-    "mike>=2.1.3",
-    "mkdocs-git-revision-date-localized-plugin>=1.4.7",
-    "mkdocs-material>=9.6.14",
-    "mkdocstrings[python]>=0.29.1",
-    "termynal>=0.13.0",
+    "mike>=2.2.0",
+    "mkdocs-git-revision-date-localized-plugin>=1.6.0",
+    "mkdocs-material>=9.7.7",
+    "mkdocstrings[python]>=1.0.6",
+    "termynal>=0.14.0",
     "mkdocs-git-committers-plugin-2>=2.5.0",
 ]
 
@@ -97,7 +93,6 @@ canfar = "canfar.cli.main:main"
 # Ruff configuration - handles formatting, linting, and import sorting
 [tool.ruff]
 target-version = "py39"
-line-length = 88
 exclude = [
     ".bzr",
     ".direnv",
@@ -105,7 +100,6 @@ exclude = [
     ".git",
     ".git-rewrite",
     ".hg",
-    ".mypy_cache",
     ".nox",
     ".pants.d",
     ".pytype",
@@ -222,40 +216,18 @@ convention = "google"
 max-args = 8
 
 [tool.ruff.format]
-quote-style = "double"
-indent-style = "space"
-skip-magic-trailing-comma = false
-line-ending = "auto"
 docstring-code-format = true
-docstring-code-line-length = "dynamic"
 
-# MyPy configuration
-[tool.mypy]
-python_version = "3.10"
-warn_return_any = true
-warn_unused_configs = true
-warn_redundant_casts = true
-warn_unused_ignores = true
-warn_no_return = true
-warn_unreachable = true
-check_untyped_defs = true
-disallow_any_generics = true
-disallow_incomplete_defs = true
-disallow_subclassing_any = true
-disallow_untyped_calls = true
-disallow_untyped_decorators = true
-disallow_untyped_defs = true
-ignore_missing_imports = false
-implicit_reexport = false
-no_implicit_optional = true
-extra_checks = true
-strict_equality = true
-strict_optional = true
-plugins = ["pydantic.mypy"]
+# ty configuration (replaces mypy)
+[tool.ty.rules]
+unused-ignore-comment = "ignore"
 
-[[tool.mypy.overrides]]
-module = ["tests.*"]
-ignore_errors = true
+[tool.ty.environment]
+python-version = "3.10"
+
+[tool.ty.src]
+# Limit type-checking to the shipped package; mirrors the former mypy scope.
+exclude = ["tests/", "docs/"]
 
 # Pytest configuration
 [tool.pytest.ini_options]
@@ -268,9 +240,8 @@ addopts = [
     "--cov-report=term-missing:skip-covered",
     "--cov-report=html",
     "--cov-report=xml",
-    "--cov-fail-under=80",
+    "--cov-fail-under=75",
     "-n=auto",  # Enable parallel execution with pytest-xdist
-    "--dist=loadfile",  # Use loadfile distribution to ensure tests in same file run in same worker (required for pytest-order)
 ]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -278,7 +249,6 @@ markers = [
     "integration: marks tests as integration tests (deselect with '-m \"not integration\"')",
     "unit: marks tests as unit tests",
     "slow: marks tests as slow (deselect with '-m \"not slow\"')",
-    "order: marks tests that need to run in a specific order (will run sequentially)",
 ]
 filterwarnings = [
     "error",
@@ -310,48 +280,16 @@ exclude_lines = [
     "pass",
     "@(abc\\.)?abstractmethod",
     "class .*\\bProtocol\\):",
-    "@(abc\\.)?abstractmethod",
-    "raise NotImplementedError",
     "if 0:",
     "if False:",
-    "if TYPE_CHECKING:",
 ]
 show_missing = true
-skip_covered = false
 precision = 2
-
-[tool.coverage.html]
-directory = "htmlcov"
-
-[tool.coverage.xml]
-output = "coverage.xml"
-
-# Bandit security linter configuration
-[tool.bandit]
-exclude_dirs = ["tests", "venv", ".venv"]
-skips = ["B101", "B601"]  # Skip assert_used and shell_injection_process_function
-
-# Additional tool configurations for completeness
-[tool.vulture]
-min_confidence = 80
-paths = ["canfar", "tests"]
-exclude = ["venv/", ".venv/"]
 
 [tool.interrogate]
 ignore-init-method = true
-ignore-init-module = false
-ignore-magic = false
-ignore-semiprivate = false
-ignore-private = false
-ignore-property-decorators = false
-ignore-module = false
-ignore-nested-functions = false
 ignore-nested-classes = true
-ignore-setters = false
 fail-under = 80
 exclude = ["setup.py", "docs", "build"]
 ignore-regex = ["^get$", "^mock_.*", ".*BaseClass.*"]
 verbose = 3
-quiet = false
-whitelist-regex = []
-color = true

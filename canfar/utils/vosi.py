@@ -1,16 +1,16 @@
 from __future__ import annotations
 
 import re
-from collections import OrderedDict
 from typing import TypedDict, cast
 
-import httpx
 from defusedxml import ElementTree
 
 # --- Constants & helpers ------------------------------------------------------
 
 LEGACY_SESSIONS_STDID = "vos://cadc.nrc.ca~vospace/CADC/std/Proc#sessions-1.0"
 PLATFORM_PREFIX = "http://www.opencadc.org/std/platform#session-"
+VOSPACE_NODES_STDID = "ivo://ivoa.net/std/VOSpace/v2.0#nodes"
+_XSI_TYPE = "{http://www.w3.org/2001/XMLSchema-instance}type"
 
 # Auth mode rename map
 AUTH_RENAME = {
@@ -44,7 +44,7 @@ def _normalize_auth_id(standard_id: str) -> str:
     Returns:
         The normalized auth mode string (renamed if necessary).
     """
-    raw = standard_id.split("#", 1)[-1] if "#" in standard_id else standard_id
+    raw = standard_id.split("#", 1)[-1]
     return AUTH_RENAME.get(raw, raw)
 
 
@@ -112,15 +112,9 @@ def _parse_version_tuple(v: str | None) -> tuple[int, ...] | None:
     return tuple(int(p) for p in m.group(1).split("."))
 
 
-def _version_sort_key(v: str | None) -> tuple[int, tuple[int, ...]]:
-    """Key for sorting versions (latest first)."""
-    tup = _parse_version_tuple(v)
-    if tup is None:
-        return (1, (0,))
-    return (0, tup)
-
-
-def capabilities(url: str | None = None, xml: str | None = None) -> list[Capability]:  # noqa: PLR0912 too many branches (clarity)
+def capabilities(  # noqa: PLR0912 too many branches (clarity)
+    xml: str,
+) -> list[Capability]:
     """Parse sessions capabilities into a list of endpoint families.
 
     Rules:
@@ -135,8 +129,7 @@ def capabilities(url: str | None = None, xml: str | None = None) -> list[Capabil
       * Output is sorted by version (latest first).
 
     Args:
-        url: A VOSI capabilities XML payload as a string.
-        xml: A VOSI capabilities XML payload as a string.
+        xml: A VOSI capabilities XML payload.
 
     Returns:
         A list of dictionaries of the form:
@@ -149,15 +142,10 @@ def capabilities(url: str | None = None, xml: str | None = None) -> list[Capabil
             ...
         ]
     """
-    if xml:
-        root = ElementTree.fromstring(xml)
-    elif url:
-        xml = httpx.get(url).text
-    else:
-        msg = "Either url or xml must be provided"
-        raise ValueError(msg)
+    if not xml.strip():
+        return []
     root = ElementTree.fromstring(xml)
-    buckets: OrderedDict[tuple[str, str | None], Capability] = OrderedDict()
+    buckets: dict[tuple[str, str | None], Capability] = {}
 
     for cap in root.findall(".//{*}capability"):
         std_id = cap.get("standardID")
@@ -186,11 +174,10 @@ def capabilities(url: str | None = None, xml: str | None = None) -> list[Capabil
             else:
                 version = std_major
 
-            key = (baseurl, version)
-            bucket = buckets.get(key)
-            if not bucket:
-                bucket = Capability(baseurl=baseurl, version=version, auth_modes=[])
-                buckets[key] = bucket
+            bucket = buckets.setdefault(
+                (baseurl, version),
+                Capability(baseurl=baseurl, version=version, auth_modes=[]),
+            )
 
             for sec in iface.findall("{*}securityMethod"):
                 sid = sec.get("standardID")
@@ -207,10 +194,29 @@ def capabilities(url: str | None = None, xml: str | None = None) -> list[Capabil
 
     items: list[Capability] = list(buckets.values())
 
-    def sort_key(item: Capability) -> tuple[int, tuple[int, ...], str]:
-        v = item.get("version")
-        marker, tup = _version_sort_key(v)
-        return (marker, tup, item["baseurl"])
-
-    items.sort(key=sort_key, reverse=True)
+    items.sort(key=lambda item: item["baseurl"])
+    items.sort(
+        key=lambda item: _parse_version_tuple(item.get("version")) or (),
+        reverse=True,
+    )
     return items
+
+
+def is_vospace_service(xml: str) -> bool:
+    """Return whether VOSI XML exposes the OpenCADC VOSpace node binding."""
+    root = ElementTree.fromstring(xml)
+    for capability in root.findall(".//{*}capability"):
+        if capability.get("standardID") != VOSPACE_NODES_STDID:
+            continue
+        for interface in capability.findall("{*}interface"):
+            if interface.get("role") != "std":
+                continue
+            if interface.get(_XSI_TYPE, "").rsplit(":", 1)[-1] != "ParamHTTP":
+                continue
+            if any(
+                (access.get("use") in {None, "base"})
+                and bool((access.text or "").strip())
+                for access in interface.findall("{*}accessURL")
+            ):
+                return True
+    return False

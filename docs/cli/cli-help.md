@@ -1,496 +1,314 @@
-# CLI Reference
+# CLI reference
 
-The CLI provides a comprehensive command-line interface for interacting with the CANFAR Science Platform. This reference covers all available commands and their options.
+The `canfar` command manages Authentication, Science Platform Server
+selection, Sessions, Container Images, data sources, and client configuration.
+Run `canfar --help` or append `--help` to any command for the installed
+options.
 
-!!! info "Getting Started"
-    The CLI can be accessed using the `canfar` command in your environment:
-    ```bash
-    canfar --help
-    ```
+Development builds also discover installed [CLI extensions](extensions.md).
+They appear under **Extensions** in root help and define their own options.
 
-## Main Command
+## Canonical commands
+
+The root keeps Session and information operations as leaves. Authentication,
+Server, data, image, and configuration operations remain grouped:
+
+| Area | Commands |
+| --- | --- |
+| Authentication and Server Selection | `login`, `auth`, `server` |
+| Sessions | `create`, `ps`, `events`, `info`, `open`, `logs`, `renew`, `delete`, `prune` |
+| Platform information | `stats`, `image ls` |
+| Client configuration | `config show`, `config get`, `config set`, `config path`, `version` |
+| Data | `data` and its embedded file commands |
+
+There are no extra command names between the root and these leaves. In
+particular, Session creation is `canfar create`, and login is `canfar login`.
+
+<span id="root-logging-controls"></span>
+
+## Root logging options
+
+Root logging options must come before the command:
 
 ```bash
-canfar [OPTIONS] COMMAND [ARGS]...
+canfar --log-level debug ps
+canfar -v ps
+canfar --log-file ./logs/canfar.jsonl ps
 ```
 
-**Description:** Command Line Interface for Science Platform.
+| Option | Effect |
+| --- | --- |
+| `--log-level LEVEL` | `critical`, `error`, `warning`, `info`, or `debug`. |
+| `-v` | `info` progress; `-vv` or more selects `debug`. |
+| `--log-file PATH` | Add the rotating JSON Lines file sink. |
 
-### Global Options
+See [Logging](logging.md) for precedence, stream routing, file records, and
+setup errors.
 
-| Option | Description |
-|--------|-------------|
-| `--install-completion` | Install completion for the current shell |
-| `--show-completion` | Show completion for the current shell, to copy it or customize the installation |
-| `--help` | Show help message and exit |
+<span id="canfar-auth"></span>
 
-!!! tip "Shell Completion"
-    Enable shell completion for a better CLI experience by running:
-    ```bash
-    canfar --install-completion
-    ```
+## Authentication and Servers
 
----
+<span id="canfar-login"></span>
 
-## Authentication
+### Login
 
-### `canfar auth`
-
-This command group provides tools for managing authentication contexts for connecting to Science Platform servers.
-
-#### `canfar auth login`
-
-Login to Science Platform with automatic server discovery.
-
-```bash
-canfar auth login [OPTIONS]
+```text title="Command syntax"
+canfar login [IDP] [OPTIONS]
 ```
 
-**Description:** This command guides you through the authentication process, automatically discovering the upstream server and choosing the appropriate authentication method based on the server's configuration.
+`IDP` is an optional canonical Identity Provider key. Without it, the CLI
+prompts for one. The options are:
 
-##### Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `--force` | Flag | - | Force re-authentication |
-| `--debug` | Flag | - | Enable debug logging |
-| `--dead` | Flag | - | Include dead servers in discovery |
-| `--dev` | Flag | - | Include dev servers in discovery |
-| `--details` | Flag | - | Include server details in discovery |
-| `--timeout`, `-t` | INTEGER | 2 | Timeout for server response |
-| `--discovery-url` | TEXT | `https://ska-iam.stfc.ac.uk/.well-known/openid-configuration` | OIDC Discovery URL |
-
-!!! example "Basic Login"
-    ```bash
-    canfar auth login
-    ```
-
-!!! example "Login with Debug Information"
-    ```bash
-    canfar auth login --debug --details
-    ```
-
-#### `canfar auth list` / `canfar auth ls`
-
-Shows all available authentication contexts.
+| Option | Effect |
+| --- | --- |
+| `--force`, `-f` | Re-authenticate an existing Authentication Record. |
+| `--dev` | Include development registries and endpoints during discovery. |
+| `--timeout`, `-t` | HTTP timeout in seconds; default `10`. |
 
 ```bash
-canfar auth list [OPTIONS]
+canfar login cadc
+canfar login srcnet --force
 ```
 
-#### `canfar auth switch` / `canfar auth use`
+During discovery, login shows a live grid of the Servers it found, counting
+those discovered, timed out, unreachable, or failed, and suggests a longer
+`--timeout` when a Server times out; `--log-level info` labels each square with
+its Server Name. The interactive credential flow, discovery outcomes, and
+Server Selection are described in
+[Authentication and Servers](authentication-contexts.md).
 
-Switch the active authentication context.
+### Authentication
 
-```bash
-canfar auth switch CONTEXT
+```text title="Command syntax"
+canfar auth
+canfar auth show
+canfar auth ls
+canfar auth use IDP
+canfar auth rm IDP [--force]
+canfar auth purge --force
 ```
 
-**Arguments:**
+`canfar auth` is the same active-Authentication view as `canfar auth show`.
+`auth use` selects a saved Authentication Record; `auth rm` also removes the
+associated Servers; `auth purge --force` resets Authentication and Server state.
 
-- `CONTEXT` (required): The name of the context to activate
+<span id="canfar-server"></span>
 
-!!! example
-    ```bash
-    canfar auth switch SRCnet-Sweden
-    ```
-
-#### `canfar auth remove` / `canfar auth rm`
-
-Remove a specific authentication context from the configuration.
+### Server Selection
 
 ```bash
-canfar auth remove CONTEXT
+canfar server ls
+canfar server use SELECTOR
 ```
 
-**Arguments:**
+`SELECTOR` may be a Server Name or an IVOA URI. `server ls` lists Servers for
+the active IDP and discovers them when no saved Servers are available. It
+shows each Server's flexible and fixed CPU and memory limits, GPUs, and
+interactive Session limit, or `unknown` when the Server does not advertise
+one; machine output has them under `resources`.
 
-- `CONTEXT` (required): The name of the context to remove
+## Sessions
 
-!!! warning "Permanent Action"
-    This action permanently removes the authentication context and cannot be undone.
+<span id="canfar-create"></span>
 
-#### `canfar auth purge`
+### Create
 
-Remove all authentication contexts and credentials from the configuration.
-
-```bash
-canfar auth purge [OPTIONS]
-```
-
-##### Options
-
-| Option | Description |
-|--------|-------------|
-| `--yes`, `-y` | Skip confirmation prompt |
-
-!!! danger "Destructive Action"
-    This command removes ALL authentication contexts. Use with caution!
-
----
-
-## Session Management
-
-### `canfar create`
-
-Create a new session on the Science Platform.
-
-```bash
+```text title="Command syntax"
 canfar create [OPTIONS] KIND IMAGE [-- CMD [ARGS]...]
 ```
 
-!!! note "Passing Commands & Arguments"
+`KIND` is one of `desktop`, `notebook`, `carta`, `headless`, `firefly`, or
+`contributed`. `IMAGE` is a CANFAR Container Image such as
+`skaha/astroml:latest`; the client adds the CANFAR registry and `:latest` when
+they are omitted. That shorthand always expands to `images.canfar.net`, so on a
+Server that trusts another registry, write the full `REGISTRY/PROJECT/IMAGE:TAG`
+name from `canfar image ls`. Accepted ranges for every option are in
+[Session limits](../platform/sessions/limits.md).
 
-    ```bash
-    canfar create headless skaha/terminal:1.1.2 -- python3 /path/to/script.py --arg1
-    ```
-    In this example, `python3` is the command and `/path/to/script.py --arg1` are the arguments.
+| Option | Effect |
+| --- | --- |
+| `--name`, `-n` | Session name; a generated name is used by default. |
+| `--cpu`, `-c` | Requested CPU cores. |
+| `--memory`, `-m` | Requested RAM in GB. |
+| `--gpu`, `-g` | Requested GPU count. |
+| `--env`, `-e KEY=VALUE` | Set an environment variable; repeat as needed. |
+| `--replicas`, `-r` | Number of Sessions, 1 to 256; default `1`. |
+| `--debug` | Print the parsed Session request. |
+| `--dry-run` | Validate and print the request without creating a Session. |
+| `--output`, `-o` | Emit created Session IDs as `json` or `yaml`. |
 
-    !!! warning ""
-
-        - If you need to pass arguments to the command, you must use the `--` separator.
-        - If you don’t supply a `CMD`, the `--` is not necessary.
-
-**Arguments:**
-
-- `KIND` (required): Session type - one of: `desktop`, `notebook`, `carta`, `headless`, `firefly`, `contributed`
-- `IMAGE` (required): Container image to use
-- `CMD [ARGS]...` (optional): Runtime command and arguments
-
-#### Options
-
-| Option | Short | Type | Default | Description |
-|--------|-------|------|---------|-------------|
-| `--name` | `-n` | TEXT | Auto-generated | Name of the session |
-| `--cpu` | `-c` | INTEGER | flexible | Number of CPU cores (optional - uses flexible allocation if not specified) |
-| `--memory` | `-m` | INTEGER | flexible | Amount of RAM in GB (optional - uses flexible allocation if not specified) |
-| `--gpu` | `-g` | INTEGER | None | Number of GPUs |
-| `--env` | `-e` | TEXT | None | Environment variables (e.g., `--env KEY=VALUE`) |
-| `--replicas` | `-r` | INTEGER | 1 | Number of replicas to create |
-| `--debug` | - | Flag | - | Enable debug logging |
-| `--dry-run` | - | Flag | - | Dry run. Parse parameters and exit |
-
-!!! example "Create a Flexible Notebook Session (Default)"
-    ```bash
-    # Uses flexible resource allocation - adapts to user load
-    canfar create notebook skaha/astroml:latest
-    ```
-
-!!! example "Create a Fixed Resource Notebook Session"
-    ```bash
-    # Uses fixed resource allocation - guaranteed resources
-    canfar create --cpu 4 --memory 8 notebook skaha/astroml:latest
-    ```
-
-!!! example "Create a Headless Session with Command & Arguments"
-    ```bash
-    canfar create headless skaha/terminal:1.1.2 -- python3 /path/to/script.py --arg1 --arg2
-    ```
-
-!!! example "Create Replicated Headless Sessions"
-    ```bash
-    # Create 10 headless replicas running the `env` command
-    canfar create --replicas 10 headless skaha/terminal:1.1.2 -- env
-    ```
-
-#### Resource Allocation Modes
-
-CANFAR Science Platform supports two resource allocation modes, see [platform concepts](../platform/concepts.md#resource-allocation-modes) for more information.
-
-### `canfar ps`
-
-Show running sessions.
+Everything after `--` belongs to the container command. The first token is
+the command and the remaining tokens are its arguments, even when they look
+like CANFAR options:
 
 ```bash
+canfar create headless skaha/terminal:1.1.2 -- python /arc/projects/demo/run.py
+canfar create headless skaha/terminal:1.1.2 -- worker --output json -o yaml
+```
+
+The `--output` option must appear before `--`. `--dry-run` cannot be combined
+with machine output. `--cpu`, `--memory`, `--gpu`, and `--replicas` accept
+the ranges `canfar create --help` shows. When the active Server's limits are
+known, the `--cpu`, `--memory`, and `--gpu` ranges narrow to the values both
+the client and that Server accept, and the default shows how far a flexible
+Session can burst, for example `[default: flexible ≤ 16]`. A Server without
+GPUs accepts only `--gpu 0`, which requests none. A value outside a range is a
+usage error:
+exit code 2 with `Invalid value` on stderr, before any request is sent,
+`--dry-run` included.
+
+<span id="canfar-ps"></span>
+
+### List Sessions
+
+```text title="Command syntax"
 canfar ps [OPTIONS]
 ```
 
-#### Options
+| Option | Effect |
+| --- | --- |
+| `--all`, `-a` | Include all statuses; otherwise show `Pending` and `Running`. |
+| `--quiet`, `-q` | Print matching Session IDs in human mode. |
+| `--kind`, `-k` | Filter by Session Kind. |
+| `--status`, `-s` | Pass a status filter to the Science Platform. |
+| `--debug` | Print Session response warnings. |
+| `--output`, `-o` | Emit the filtered Session response array as `json` or `yaml`. |
 
-| Option | Short | Type | Description |
-|--------|-------|------|-------------|
-| `--all` | `-a` | Flag | Show all sessions (default shows just running) |
-| `--quiet` | `-q` | Flag | Only show session IDs |
-| `--kind` | `-k` | Choice | Filter by session kind: `desktop`, `notebook`, `carta`, `headless`, `firefly`, `desktop-app`, `contributed` |
-| `--status` | `-s` | Choice | Filter by status: `Pending`, `Running`, `Terminating`, `Succeeded`, `Error`, `Failed` |
-| `--debug` | - | Flag | Enable debug logging |
-
-!!! example "List All Sessions"
-    ```bash
-    canfar ps --all
-    ```
-
-!!! example "List Only Notebook Sessions"
-    ```bash
-    canfar ps --kind notebook
-    ```
-
-### `canfar events`
-
-Show session events for debugging and monitoring.
+`ps` stays a thin operation over `Session.fetch()`: `--kind` and `--status`
+are sent to the fetch call, then the CLI applies the running/default or
+`--all` view to the returned responses. `--quiet` follows that same filter,
+including when combined with `--all`, and is not available with `--output`.
 
 ```bash
-canfar events [OPTIONS] SESSION_IDS...
+canfar ps
+canfar ps --all --kind headless
+canfar ps -o json
 ```
 
-**Arguments:**
+<span id="inspect-and-clean-up"></span>
 
-- `SESSION_IDS...` (required): One or more session IDs
+### Inspect, open, and remove
 
-#### Options
+These leaves accept one or more Session IDs and produce human-readable output:
 
-| Option | Description |
-|--------|-------------|
-| `--debug` | Enable debug logging |
+| Command | Purpose |
+| --- | --- |
+| `canfar events SESSION_ID...` | List Science Platform events. |
+| `canfar info SESSION_ID...` | Show Session details; `--debug` adds response warnings. |
+| `canfar logs SESSION_ID...` | Show Session logs. |
+| `canfar open SESSION_ID...` | Open ready Sessions in new browser tabs. |
+| `canfar renew SESSION_ID...` | Reset the lifetime of interactive Sessions. |
+| `canfar delete SESSION_ID... [--force]` | Delete Sessions, confirming unless `--force` is used. |
+| `canfar prune PREFIX [KIND] [STATUS]` | Delete matching names; defaults to `headless` and `Succeeded`. |
 
-!!! example
-    ```bash
-    canfar events abc123 def456
-    ```
-
-### `canfar info`
-
-Show detailed information about sessions.
+`prune` treats a plain `PREFIX` as a literal prefix. A value containing regex
+metacharacters is treated as a regular expression. Quote such values so the
+shell does not expand them:
 
 ```bash
-canfar info [OPTIONS] SESSION_IDS...
+canfar prune 'notebook.*' notebook Completed
 ```
 
-**Arguments:**
+<span id="images-and-platform-state"></span>
 
-- `SESSION_IDS...` (required): One or more session IDs
-
-#### Options
-
-| Option | Description |
-|--------|-------------|
-| `--debug` | Enable debug logging |
-
-!!! example
-    ```bash
-    canfar info abc123
-    ```
-
-### `canfar open`
-
-Open sessions in a web browser.
+### Platform information
 
 ```bash
-canfar open [OPTIONS] SESSION_IDS...
+canfar stats
+canfar image ls
+canfar image ls --kind notebook
+canfar version
+canfar version --debug
 ```
 
-**Arguments:**
+`stats` prints CPU and RAM usage, plus GPU usage when the server includes it.
+**Maximum Resource Requests** shows the Fixed and
+Flexible CPU and RAM maxima saved for your selected server, as listed by
+`canfar server ls`. Missing limits are shown as `unknown`; these request limits
+do not guarantee that capacity is currently available.
 
-- `SESSION_IDS...` (required): One or more session IDs
+`image ls` lists Container Images and accepts the image-kind filter shown above. `version --debug` prints client,
+Python, operating-system, and dependency details for a bug report; it is not a
+logging control.
 
-#### Options
-
-| Option | Description |
-|--------|-------------|
-| `--debug` | Enable debug logging |
-
-!!! tip "Browser Integration"
-    This command automatically opens the session URLs in your default web browser.
-
-!!! example
-    ```bash
-    canfar open abc123 def456
-    ```
-
-### `canfar logs`
-
-Show session logs for troubleshooting.
+### Help and feedback
 
 ```bash
-canfar logs [OPTIONS] SESSION_IDS...
+canfar feedback
 ```
 
-**Arguments:**
+Clients from v1.5.0 onward print the GitHub chooser URL without
+authentication, configuration reads, browser opening, or diagnostics
+collection. Use it for problems, questions, ideas, and documentation feedback.
+See the [community guidelines](../platform/community/guidelines.md) for
+follow-up and private support.
 
-- `SESSION_IDS...` (required): One or more session IDs
+<span id="data"></span>
+<span id="client-configuration"></span>
 
-#### Options
-
-| Option | Description |
-|--------|-------------|
-| `--debug` | Enable debug logging |
-
-!!! example
-    ```bash
-    canfar logs abc123
-    ```
-
-### `canfar delete`
-
-Delete one or more sessions.
+## Data and configuration
 
 ```bash
-canfar delete [OPTIONS] SESSION_IDS...
+canfar data --help
+canfar config show
+canfar config get console.width
+canfar config set console.width 132
+canfar config path
 ```
 
-**Arguments:**
+Data operands use an explicit `Storage Identifier`, for example
+`arc:/home/user/file.fits` or `local:/tmp/file.fits`. See [Data commands](data.md)
+for the embedded commands. Configuration keys use dotted paths; values
+passed to `config set` are parsed as YAML. See [Authentication and Servers](authentication-contexts.md)
+for the persisted Authentication, Server, and active-selection shape.
 
-- `SESSION_IDS...` (required): One or more session IDs to delete
+The Data tools have been in beta since v1.5.0. Bare Data and
+subcommand help show a beta notice; operations and Python calls do not.
 
-#### Options
+<span id="machine-output-contract"></span>
 
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--force` | `-f` | Force deletion without confirmation |
-| `--debug` | - | Enable debug logging |
+## Machine output
 
-!!! warning "Permanent Action"
-    Deleted sessions cannot be recovered. Use `--force` to skip confirmation prompts.
-
-!!! example "Delete with Confirmation"
-    ```bash
-    canfar delete abc123
-    ```
-
-!!! example "Force Delete Multiple Sessions"
-    ```bash
-    canfar delete abc123 def456 --force
-    ```
-
-### `canfar prune`
-
-Prune sessions by criteria for bulk cleanup.
+The leaf option `-o/--output` accepts only `json` or `yaml`. It is available on
+the data-producing forms `auth` (the default active view), `auth show`,
+`auth ls`, `server ls`, `create`, `ps`, `config show`, and `config get`:
 
 ```bash
-canfar prune [OPTIONS] PREFIX KIND STATUS
+canfar auth show -o json
+canfar server ls --output yaml
+canfar create headless skaha/terminal:1.1.2 -o json
+canfar config get active.server -o json
 ```
 
-**Arguments:**
+The payload is the same Python result used by that command after its normal
+filtering. For example, `create -o json` is a raw list of Session IDs and
+`ps -o json` is a filtered array of Session response objects; neither is
+wrapped in a command-specific envelope. Human active-Server banners and logs
+never precede the machine payload on stdout. Diagnostics and errors use stderr.
 
-- `PREFIX` (required): Prefix to match session names; regex is used if metacharacters are present
-- `KIND` (optional): Session kind - default: `headless` (one of: `desktop`, `notebook`, `carta`, `headless`, `firefly`, `desktop-app`, `contributed`)
-- `STATUS` (optional): Session status - default: `Succeeded` (one of: `Pending`, `Running`, `Terminating`, `Succeeded`, `Error`, `Failed`)
+### Failures and exit status
 
-#### Options
+A command that fails exits with a nonzero status. In human mode the message
+and a hint go to stderr. In machine mode stderr carries one structured object
+with a stable `code`, a `message`, and a `hint`, and stdout stays empty:
 
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--debug` | - | Enable debug logging |
-| `--help` | `-h` | Show help message and exit |
-
-!!! example "Prune Completed Headless Sessions"
-    ```bash
-    canfar prune "test-" headless Running
-    canfar prune ".*-was-" notebook Running  # regex because of metacharacters
-    ```
-
-!!! tip "Bulk Cleanup"
-    Use prune to clean up multiple sessions that match specific criteria, especially useful for automated workflows.
-
----
-
-## Cluster Info
-
-### `canfar stats`
-
-Show cluster statistics and resource usage.
-
-```bash
-canfar stats [OPTIONS]
+```json
+{"code": "authentication.required", "message": "Not authenticated with 'cadc'.\nReason: X.509 certificate has not been issued.", "hint": "Run `canfar login cadc` and retry."}
 ```
 
-#### Options
+| Code | Meaning | Next step |
+| --- | --- | --- |
+| `authentication.required` | Credentials are missing, or OIDC refresh requires a new login. | Run `canfar login IDP` with the IDP named in the hint. |
+| `authentication.expired` | The saved credential has expired. | Run `canfar login IDP` with the IDP named in the hint. |
+| `authentication.credential_invalid` | A credential is saved but cannot be used, such as an unreadable certificate. | Check `canfar auth show`, then log in again. |
+| `transport.failure` | A request to the Science Platform or IDP failed. | Follow the hint, check connectivity, then retry. |
 
-| Option | Description |
-|--------|-------------|
-| `--debug` | Enable debug logging |
+Codes are stable; message and hint wording can change. Every command that
+contacts a Server reports a missing login this way, including the human-text
+commands `info`, `events`, `logs`, `open`, `stats`, and `image ls`.
 
-!!! example
-    ```bash
-    canfar stats
-    ```
-
-!!! info "Resource Monitoring"
-    This command provides insights into cluster resource usage, helping you understand available capacity.
-
----
-
-## Client Configuration
-
-### `canfar config`
-
-Manage client configuration settings.
-
-#### `canfar config show` / `canfar config list` / `canfar config ls`
-
-Display the current configuration.
-
-```bash
-canfar config show [OPTIONS]
-```
-
-!!! example
-    ```bash
-    canfar config ls
-    ```
-
-#### `canfar config path`
-
-Display the path to the configuration file.
-
-```bash
-canfar config path [OPTIONS]
-```
-
-!!! example
-    ```bash
-    canfar config path
-    ```
-
-!!! tip "Configuration Location"
-    Use this command to find where your configuration file is stored for manual editing if needed.
-
-#### `canfar config get`
-
-Get a single configuration value by dotted path.
-
-```bash
-canfar config get PATH
-```
-
-!!! example
-    ```bash
-    canfar config get console.width
-    ```
-
-#### `canfar config set`
-
-Set a single configuration value by dotted path (value is parsed as YAML).
-
-```bash
-canfar config set PATH VALUE
-```
-
-!!! example
-    ```bash
-    canfar config set console.width 130
-    ```
-
-### `canfar version`
-
-View client version and system information.
-
-```bash
-canfar version [OPTIONS]
-```
-
-#### Options
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--debug` / `--no-debug` | `--no-debug` | Show detailed information for bug reports |
-
-!!! example "Basic Version Info"
-    ```bash
-    canfar version
-    ```
-
-!!! example "Detailed Debug Information"
-    ```bash
-    canfar version --debug
-    ```
+Put `-o/--output` after the command that owns it. Root `-o`, `--json`, and
+`--yaml` are not options, and commands without machine output reject `-o`.
+For `create`, `-o` is parsed only before `--`; after the delimiter it is a
+container-command token.

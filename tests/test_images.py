@@ -1,8 +1,8 @@
 """Test Canfar Images API."""
 
-from unittest.mock import patch
-
+import httpx2
 import pytest
+from pydantic import SecretStr
 
 from canfar.images import Images
 from canfar.models.containers import Image
@@ -12,15 +12,21 @@ from canfar.models.containers import Image
 def images():
     """Test images."""
     images = Images()
-    yield images
-    del images
+    try:
+        yield images
+    finally:
+        images.__exit__(None, None, None)
 
 
+@pytest.mark.integration
+@pytest.mark.slow
 def test_images_fetch(images: Images) -> None:
     """Test fetching images."""
     assert len(images.fetch()) > 0
 
 
+@pytest.mark.integration
+@pytest.mark.slow
 def test_images_with_kind(images: Images) -> None:
     """Test fetching images with kind."""
     assert "images.canfar.net/skaha/base-notebook:latest" in images.fetch(
@@ -37,13 +43,54 @@ def test_images_details_returns_models() -> None:
             "digest": "sha256:deadbeef",
         }
     ]
-    images = Images()
 
-    with patch("canfar.images.HTTPClient.client") as client:
-        client.get.return_value.json.return_value = payload
-        results = images.details()
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(200, json=payload, request=request)
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            "canfar.client.Client",
+            lambda **kwargs: httpx2.Client(
+                transport=httpx2.MockTransport(respond), **kwargs
+            ),
+        )
+        with Images(token=SecretStr("token"), url="https://example.test") as images:
+            results = images.details()
 
     assert isinstance(results[0], Image)
     assert results[0].id == payload[0]["id"]
     assert results[0].types == payload[0]["types"]
     assert results[0].digest == payload[0]["digest"]
+
+
+def test_images_fetch_uses_http_client_params() -> None:
+    """Fetch returns image IDs and passes optional kind as request parameter."""
+    requests: list[httpx2.Request] = []
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        return httpx2.Response(
+            200,
+            json=[{"id": "images.canfar.net/skaha/terminal:latest"}],
+            request=request,
+        )
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(
+            "canfar.client.Client",
+            lambda **kwargs: httpx2.Client(
+                transport=httpx2.MockTransport(respond), **kwargs
+            ),
+        )
+        with Images(
+            token=SecretStr("token"), url="https://example.test/skaha/v1"
+        ) as images:
+            assert images.fetch() == ["images.canfar.net/skaha/terminal:latest"]
+            assert images.fetch(kind="headless") == [
+                "images.canfar.net/skaha/terminal:latest"
+            ]
+
+    assert [request.url.params.multi_items() for request in requests] == [
+        [],
+        [("type", "headless")],
+    ]

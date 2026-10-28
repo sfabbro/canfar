@@ -2,18 +2,42 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 from pathlib import Path  # noqa: TC003
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from canfar import get_logger
 from canfar.auth import x509
-from canfar.models.http import Server
+from canfar.idp import AuthMode
 
-log = get_logger(__name__)
+log = logging.getLogger(__name__)
+
+
+def _secret_present(value: SecretStr | None) -> bool:
+    """Return whether a secret field holds a non-empty value."""
+    return value is not None and bool(value.get_secret_value())
+
+
+class Authentication(BaseModel):
+    """CANFAR Authentication record."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    idp: str = Field(description="Canonical Identity Provider key.")
+    name: str = Field(description="Human-readable IDP name.")
+    mode: AuthMode = Field(description="Authentication mode.")
+    expiry: float | None = Field(
+        default=None,
+        description="Credential expiry as Unix timestamp when applicable.",
+    )
+    active: bool = Field(description="Whether this record is active.")
+    server: str | None = Field(
+        default=None,
+        description="Selected server URI reference when available.",
+    )
 
 
 class Endpoint(BaseModel):
@@ -33,14 +57,43 @@ class Client(BaseModel):
     """OIDC client configuration."""
 
     identity: Annotated[str | None, Field(description="OIDC client ID")] = None
-    secret: Annotated[str | None, Field(description="OIDC client secret")] = None
+    secret: Annotated[
+        SecretStr | None,
+        Field(description="OIDC client secret"),
+    ] = None
+    secret_expires_at: int | None = Field(
+        default=None,
+        ge=0,
+        strict=True,
+        description="Secret expiry timestamp; zero means no expiry, None unknown.",
+    )
+
+    @property
+    def secret_expired(self) -> bool:
+        """Return whether the client secret has a known elapsed deadline."""
+        expiry = self.secret_expires_at
+        return expiry is not None and expiry != 0 and expiry <= time.time()
 
 
 class Token(BaseModel):
     """OIDC token configuration."""
 
-    access: Annotated[str | None, Field(description="Access token")] = None
-    refresh: Annotated[str | None, Field(description="Refresh token")] = None
+    access: Annotated[
+        SecretStr | None,
+        Field(description="Access token"),
+    ] = None
+    refresh: Annotated[
+        SecretStr | None,
+        Field(description="Refresh token"),
+    ] = None
+    token_type: Annotated[
+        str | None,
+        Field(description="OAuth token type"),
+    ] = None
+    scope: Annotated[
+        str | None,
+        Field(description="OAuth scope string"),
+    ] = None
 
 
 class Expiry(BaseModel):
@@ -54,69 +107,59 @@ class Expiry(BaseModel):
     ] = None
 
 
-class OIDC(BaseModel):
-    """Complete OIDC configuration."""
+class DeviceAuthorization(BaseModel):
+    """OIDC device authorization challenge returned for user approval."""
 
-    mode: Literal["oidc"] = "oidc"
-    endpoints: Annotated[
-        Endpoint,
-        Field(default_factory=Endpoint, description="OIDC Endpoints."),
+    verification_uri: Annotated[
+        str,
+        Field(description="Provider URL where the user enters their code."),
     ]
-    client: Annotated[
-        Client,
-        Field(default_factory=Client, description="OIDC Client Credentials."),
+    verification_uri_complete: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Optional provider URL containing the user verification code.",
+        ),
+    ] = None
+    user_code: Annotated[
+        SecretStr,
+        Field(description="Short-lived code displayed to the user."),
     ]
-    token: Annotated[
-        Token,
-        Field(default_factory=Token, description="OIDC Tokens"),
+    expires_in: Annotated[
+        int,
+        Field(description="Challenge lifetime in seconds."),
     ]
-    server: Annotated[
-        Server,
-        Field(default_factory=Server, description="Science Platform Server."),
+    interval: Annotated[
+        int,
+        Field(default=5, description="Initial token polling interval in seconds."),
     ]
-    expiry: Annotated[
-        Expiry,
-        Field(default_factory=Expiry, description="OIDC Token Expiry."),
+    device_code: Annotated[
+        SecretStr,
+        Field(description="Secret device code sent to the token endpoint."),
     ]
 
-    @property
-    def valid(self) -> bool:
-        """Check if all required information for getting new access tokens exists.
 
-        Returns:
-            bool: True if all required OIDC information is present, False otherwise.
-        """
-        required: list[str | float | None] = [
-            self.endpoints.discovery,
-            self.endpoints.token,
-            self.client.identity,
-            self.client.secret,
-            self.token.refresh,
-        ]
+class RuntimeCredential(BaseModel):
+    """One materialized credential, ready to authenticate a request.
 
-        # Check if all required fields are defined
-        if not all(required):
-            log.warning("Missing required OIDC configuration.")
-            return False
+    Exactly one field is set: an Authentication Record resolves to either a
+    bearer token or a validated X.509 certificate path, never both.
 
-        return True
+    Attributes:
+        token: Bearer token value, when the record provides one.
+        certificate: Validated X.509 certificate path, when the record is X.509.
+    """
 
-    @property
-    def expired(self) -> bool:
-        """Check if the OIDC access token is active.
+    model_config = ConfigDict(frozen=True)
 
-        Returns:
-            bool: True if the access token is active, False otherwise.
-        """
-        if self.expiry.access is None:
-            log.warning("OIDC access token expiry is not set.")
-            return True
-        return self.expiry.access < time.time()
+    token: str | None = None
+    certificate: str | None = None
 
 
-class X509(BaseModel):
-    """X.509 certificate configuration."""
+class X509Credential(BaseModel):
+    """X.509 authentication credential decoupled from server selection."""
 
+    idp: Annotated[str, Field(description="Canonical identity provider key.")]
     mode: Literal["x509"] = "x509"
     path: Annotated[
         Path | None,
@@ -133,56 +176,95 @@ class X509(BaseModel):
             description="ctime of cert expiration",
         ),
     ]
-    server: Annotated[
-        Server | None,
-        Field(description="X509 server information"),
-    ] = None
-
-    @property
-    def valid(self) -> bool:
-        """Check if the certificate filepath is defined and expiry is in the future.
-
-        Returns:
-            bool: True if certificate path exists and is not expired, False otherwise.
-        """
-        if self.path is None:
-            return False
-        try:
-            x509.valid(self.path)
-        except (FileNotFoundError, ValueError) as err:
-            msg = "Failed to validate x509 certificate: %s", err
-            log.exception(msg)
-            return False
-        return True
 
     @property
     def expired(self) -> bool:
-        """Check if the X.509 certificate is expired.
+        """Return whether this X.509 Authentication Record is expired.
 
-        Returns:
-            bool: True if the certificate is expired, False otherwise.
+        An unknown (zero) expiry is read from the certificate and kept.
         """
         if self.path is None:
             return True
         if math.isclose(self.expiry, 0.0, abs_tol=1e-9):
             self.expiry = x509.expiry(self.path)
             log.debug("computed expiry from cert: %s", self.expiry)
-        return self.expiry < time.time()
+        return self.expiry <= time.time()
 
 
-class TokenAuth(BaseModel):
-    """Token authentication configuration."""
+class OIDCCredential(BaseModel):
+    """OIDC authentication credential decoupled from server selection."""
 
-    mode: Literal["token"] = "token"
+    idp: Annotated[str, Field(description="Canonical identity provider key.")]
+    mode: Literal["oidc"] = "oidc"
+    endpoints: Annotated[
+        Endpoint,
+        Field(default_factory=Endpoint, description="OIDC Endpoints."),
+    ]
+    client: Annotated[
+        Client,
+        Field(default_factory=Client, description="OIDC Client Credentials."),
+    ]
     token: Annotated[
-        str | None,
-        Field(
-            default=None,
-            title="Authentication Token",
-            description="Authentication token for the server.",
-        ),
-    ] = None
-    server: Annotated[
-        Server | None,
-        Field(description="Token server information"),
-    ] = None
+        Token,
+        Field(default_factory=Token, description="OIDC Tokens"),
+    ]
+    expiry: Annotated[
+        Expiry,
+        Field(default_factory=Expiry, description="OIDC Token Expiry."),
+    ]
+
+    @property
+    def valid(self) -> bool:
+        """Return whether this Authentication Record can refresh OIDC tokens."""
+        if not (
+            self.endpoints.discovery
+            and self.endpoints.token
+            and self.client.identity
+            and _secret_present(self.client.secret)
+            and _secret_present(self.token.refresh)
+        ):
+            log.warning("Missing required OIDC configuration.")
+            return False
+        return True
+
+    @property
+    def expired(self) -> bool:
+        """Return whether this OIDC Authentication Record's access token expired."""
+        if self.expiry.access is None:
+            log.warning("OIDC access token expiry is not set.")
+            return True
+        return self.expiry.access <= time.time()
+
+    @property
+    def access_usable(self) -> bool:
+        """Return whether a nonempty access token has a future expiry."""
+        return _secret_present(self.token.access) and not self.expired
+
+    @property
+    def refreshable(self) -> bool:
+        """Return whether this record has usable, unexpired refresh credentials."""
+        refresh_expiry = self.expiry.refresh
+        return (
+            self.valid
+            and not self.client.secret_expired
+            and (refresh_expiry is None or refresh_expiry > time.time())
+        )
+
+
+AuthenticationCredential = Annotated[
+    OIDCCredential | X509Credential, Field(discriminator="mode")
+]
+"""Discriminated union of v1 authentication credentials without embedded server."""
+
+__all__ = [
+    "AuthMode",
+    "Authentication",
+    "AuthenticationCredential",
+    "Client",
+    "DeviceAuthorization",
+    "Endpoint",
+    "Expiry",
+    "OIDCCredential",
+    "Token",
+    "X509Credential",
+]
